@@ -33,6 +33,8 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
             ng_row = ng_box.row(align=True)
             
             ng_row.prop(ng, "group_ptr", text="")
+            ng_row.prop(ng, "depth", text="Depth")
+            ng_row.prop(ng, "groups_only", text="", icon='GROUP', toggle=True)
             
             op = ng_row.operator("geonodes_json.actions", text="", icon='TRASH')
             op.action = 'DEL_GROUP'

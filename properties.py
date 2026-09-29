@@ -7,6 +7,8 @@ import bpy
 
 class GeoNodesExporterNodeGroup(bpy.types.PropertyGroup):
     group_ptr: bpy.props.PointerProperty(type=bpy.types.NodeTree, name="Node Group")
+    depth: bpy.props.IntProperty(name="Depth", default=0, min=0)
+    groups_only: bpy.props.BoolProperty(name="Groups Only", default=False)
 
 classes = (
     GeoNodesExporterNodeGroup,

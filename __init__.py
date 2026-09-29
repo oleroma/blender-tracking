@@ -8,10 +8,10 @@ if __name__ == "__main__":
 if "bpy" in locals():
     import importlib
     if "properties" in locals():
+        importlib.reload(core)
         importlib.reload(properties)
         importlib.reload(operators)
         importlib.reload(ui)
-        importlib.reload(core)
 
 import bpy
 from . import properties, operators, ui, core
