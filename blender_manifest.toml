@@ -1,0 +1,11 @@
+schema_version = "1.0.0"
+
+id = "geometry_nodes_json_exporter"
+version = "1.0.0"
+name = "Geometry Nodes JSON Exporter"
+tagline = "Exports Geometry Nodes inputs to JSON"
+maintainer = "Vibecoded"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-2.0-or-later"]
