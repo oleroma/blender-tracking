@@ -53,8 +53,8 @@ class GEONODES_JSON_OT_actions(bpy.types.Operator):
     bl_label = "Action"
     bl_options = {'REGISTER', 'UNDO'}
     
-    action: bpy.props.StringProperty()
-    ng_idx: bpy.props.IntProperty(default=-1)
+    action: bpy.props.StringProperty()  # type: ignore
+    ng_idx: bpy.props.IntProperty(default=-1)  # type: ignore
     
     def execute(self, context):
         groups = context.scene.geonodes_json_exporter_groups

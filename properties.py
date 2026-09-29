@@ -6,9 +6,9 @@ how the addon configuration data is saved within the blend file.
 import bpy
 
 class GeoNodesExporterNodeGroup(bpy.types.PropertyGroup):
-    group_ptr: bpy.props.PointerProperty(type=bpy.types.NodeTree, name="Node Group")
-    depth: bpy.props.IntProperty(name="Depth", default=0, min=0)
-    groups_only: bpy.props.BoolProperty(name="Groups Only", default=False)
+    group_ptr: bpy.props.PointerProperty(type=bpy.types.NodeTree, name="Node Group")  # type: ignore
+    depth: bpy.props.IntProperty(name="Depth", default=0, min=0)  # type: ignore
+    groups_only: bpy.props.BoolProperty(name="Groups Only", default=False)  # type: ignore
 
 classes = (
     GeoNodesExporterNodeGroup,
