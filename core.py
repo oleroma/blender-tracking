@@ -38,6 +38,8 @@ def extract_node_tree_data(node_tree, current_depth, max_depth, groups_only=Fals
     ng_data = {}
     for target_node in node_tree.nodes:
         node_name = target_node.name
+        if getattr(target_node, "label", ""):
+            node_name = f"{target_node.name} ({target_node.label})"
         node_data = {}
         
         is_group = getattr(target_node, "type", "") == 'GROUP'
