@@ -11,6 +11,8 @@
 - **`operators.py`**: Defines interactive operations:
   - `GEONODES_JSON_OT_actions`: Manages adding and deleting node groups from the UI list.
   - `GEONODES_JSON_OT_export`: Triggers the extraction logic and provides UI feedback (Info/Error reports).
+  - `GEONODES_JSON_OT_import`: Parses a targeted JSON and recursively applies its stored values back to the scene nodes.
+  - Registers `auto_export_handler` to `bpy.app.handlers.save_post` to run `export_nodes_to_json` upon saving the blend file.
 - **`core.py`**: Contains the primary data logic. `export_nodes_to_json` calls a recursive helper `extract_node_tree_data` which traverses nodes in a given tree up to the group's `depth`. It pulls the `default_value` of each exposed socket and safely casts complex types to native python lists. It recurses into nested `GROUP` nodes, merging their internal nodes directly into the parent node's data dictionary.
 
 ## Data Flow

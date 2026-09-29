@@ -15,6 +15,7 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
         scene = context.scene
         
         layout.prop(scene, "geonodes_json_export_path")
+        layout.prop(scene, "geonodes_json_auto_export")
         
         groups = scene.geonodes_json_exporter_groups
         
@@ -41,7 +42,9 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
             op.ng_idx = ng_idx
 
         layout.separator()
-        layout.operator("geonodes_json.export", icon='EXPORT')
+        row = layout.row(align=True)
+        row.operator("geonodes_json.export", icon='EXPORT')
+        row.operator("geonodes_json.import", icon='IMPORT')
 
 classes = (
     GEONODES_JSON_PT_panel,
