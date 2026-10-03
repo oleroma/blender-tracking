@@ -17,7 +17,7 @@ class GEONODES_JSON_OT_export(bpy.types.Operator):
         filepath = bpy.path.abspath(context.scene.geonodes_json_export_path)
         
         try:
-            export_nodes_to_json(groups, filepath)
+            export_nodes_to_json(groups, filepath, context)
             self.report({'INFO'}, f"Successfully exported to {filepath}")
         except Exception as e:
             self.report({'ERROR'}, f"Export failed: {str(e)}")
@@ -86,7 +86,7 @@ def auto_export_handler(dummy):
     filepath = bpy.path.abspath(path)
     try:
         from .core import export_nodes_to_json
-        export_nodes_to_json(groups, filepath)
+        export_nodes_to_json(groups, filepath, context)
     except Exception:
         pass
 
