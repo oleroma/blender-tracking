@@ -4,19 +4,26 @@ import os
 import hashlib
 import array
 import subprocess
+from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 # ==============================================================================
 # UI CONFIGURATION
 # ==============================================================================
 
-UI_INDENT = 0.03    # Left indentation for nested elements (lower = less indent)
-UI_SPACING = 0.6    # Line spacing/compactness for items (lower = more compact)
+UI_INDENT = 0.04    # Left indentation for nested elements (lower = less indent)
+UI_SPACING = 0.8    # Line spacing/compactness for items (lower = more compact)
 
 # ==============================================================================
 # GLOBALS & CACHE
 # ==============================================================================
 
 _cached_diff = None
+
+def get_tracking_filepath():
+    """Returns the path to tracking.json in the current blend file's directory."""
+    if not bpy.data.is_saved or not bpy.data.filepath:
+        return None
+    return os.path.join(os.path.dirname(bpy.data.filepath), "tracking.json")
 
 # ==============================================================================
 # CORE LOGIC
@@ -37,18 +44,14 @@ def get_node_tree_topology(node_tree):
 
     return links
 
-def extract_meshes_state(context, collections):
+def extract_meshes_state(collections):
     state = {}
-    if not context:
-        return state
-
     target_objects = set()
-    for coll_item in collections:
-        coll = coll_item.collection_ptr
-        if coll:
-            for obj in coll.all_objects:
-                if obj.type == 'MESH' and obj.data:
-                    target_objects.add(obj)
+
+    for coll in collections:
+        for obj in coll.all_objects:
+            if obj.type == 'MESH' and obj.data:
+                target_objects.add(obj)
 
     for obj in target_objects:
         hasher = hashlib.md5()
@@ -120,10 +123,29 @@ def extract_node_tree_data(node_tree, current_depth, max_depth, groups_only=Fals
 
     return ng_data
 
-def export_nodes_to_json(groups, collections, filepath, context=None):
+def export_nodes_to_json(filepath):
+    merged_groups = {}
+    merged_collections = set()
+
+    for scene in bpy.data.scenes:
+        if hasattr(scene, "geonodes_json_exporter_groups"):
+            for ng in scene.geonodes_json_exporter_groups:
+                if ng.group_ptr:
+                    ptr = ng.group_ptr
+                    if ptr not in merged_groups:
+                        merged_groups[ptr] = {"depth": ng.depth, "groups_only": ng.groups_only}
+                    else:
+                        merged_groups[ptr]["depth"] = max(merged_groups[ptr]["depth"], ng.depth)
+                        merged_groups[ptr]["groups_only"] = merged_groups[ptr]["groups_only"] and ng.groups_only
+
+        if hasattr(scene, "geonodes_json_exporter_collections"):
+            for coll_item in scene.geonodes_json_exporter_collections:
+                if coll_item.collection_ptr:
+                    merged_collections.add(coll_item.collection_ptr)
+
     result = {
         "tracked_inputs": {},
-        "meshes": extract_meshes_state(context, collections),
+        "meshes": extract_meshes_state(merged_collections),
         "all_node_trees": {}
     }
 
@@ -135,12 +157,9 @@ def export_nodes_to_json(groups, collections, filepath, context=None):
         result["all_node_trees"][name] = unsorted_trees[name]
 
     unsorted_inputs = {}
-    for i, ng in enumerate(groups):
-        if not ng.group_ptr:
-            continue
-
-        ng_data = extract_node_tree_data(ng.group_ptr, 0, ng.depth, ng.groups_only)
-        unsorted_inputs[ng.group_ptr.name] = ng_data
+    for ptr, config in merged_groups.items():
+        ng_data = extract_node_tree_data(ptr, 0, config["depth"], config["groups_only"])
+        unsorted_inputs[ptr.name] = ng_data
 
     for name in sorted(unsorted_inputs.keys()):
         result["tracked_inputs"][name] = unsorted_inputs[name]
@@ -188,7 +207,7 @@ def apply_node_tree_data(node_tree, ng_data, current_depth, max_depth, groups_on
         if is_group and getattr(target_node, "node_tree", None) and current_depth < max_depth:
             apply_node_tree_data(target_node.node_tree, node_data, current_depth + 1, max_depth, groups_only)
 
-def import_nodes_from_json(groups, filepath):
+def import_nodes_from_json(filepath):
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"JSON file not found: {filepath}")
 
@@ -202,17 +221,29 @@ def import_nodes_from_json(groups, filepath):
     else:
         input_data = data
 
-    for i, ng in enumerate(groups):
-        if not ng.group_ptr or ng.group_ptr.name not in input_data:
+    merged_groups = {}
+    for scene in bpy.data.scenes:
+        if hasattr(scene, "geonodes_json_exporter_groups"):
+            for ng in scene.geonodes_json_exporter_groups:
+                if ng.group_ptr:
+                    ptr = ng.group_ptr
+                    if ptr not in merged_groups:
+                        merged_groups[ptr] = {"depth": ng.depth, "groups_only": ng.groups_only}
+                    else:
+                        merged_groups[ptr]["depth"] = max(merged_groups[ptr]["depth"], ng.depth)
+                        merged_groups[ptr]["groups_only"] = merged_groups[ptr]["groups_only"] and ng.groups_only
+
+    for ptr, config in merged_groups.items():
+        if ptr.name not in input_data:
             continue
 
-        group_info = input_data[ng.group_ptr.name]
+        group_info = input_data[ptr.name]
         if isinstance(group_info, dict) and "nodes" in group_info:
             ng_data = group_info["nodes"]
         else:
             ng_data = group_info
 
-        apply_node_tree_data(ng.group_ptr, ng_data, 0, ng.depth, ng.groups_only)
+        apply_node_tree_data(ptr, ng_data, 0, config["depth"], config["groups_only"])
 
 # ==============================================================================
 # GIT DIFF PARSING
@@ -289,7 +320,6 @@ def update_cached_diff(filepath):
         # 3. Tracked Inputs
         old_inputs = committed_data.get("tracked_inputs", {})
         new_inputs = current_data.get("tracked_inputs", {})
-        all_input_groups = sorted(set(old_inputs.keys()).union(set(new_inputs.keys())))
 
         def flatten_inputs_dict(nd, p=""):
             f = {}
@@ -302,35 +332,38 @@ def update_cached_diff(filepath):
                             f[(p, n, k)] = v
             return f
 
-        for group in all_input_groups:
-            old_nodes = old_inputs.get(group, {})
-            new_nodes = new_inputs.get(group, {})
+        # Flatten globally first to naturally deduplicate overlapping nested groups
+        global_old_flat = {}
+        for group, nodes in old_inputs.items():
+            global_old_flat.update(flatten_inputs_dict(nodes, p=group))
 
-            old_flat = flatten_inputs_dict(old_nodes, p=group)
-            new_flat = flatten_inputs_dict(new_nodes, p=group)
+        global_new_flat = {}
+        for group, nodes in new_inputs.items():
+            global_new_flat.update(flatten_inputs_dict(nodes, p=group))
 
-            all_keys = sorted(set(old_flat.keys()).union(set(new_flat.keys())))
-            for key in all_keys:
-                parent, node, inp = key
+        all_keys = sorted(set(global_old_flat.keys()).union(set(global_new_flat.keys())))
 
-                old_val = old_flat.get(key)
-                new_val = new_flat.get(key)
+        for key in all_keys:
+            parent, node, inp = key
 
-                change_type = None
-                if key not in old_flat:
-                    change_type = 'ADD'
-                elif key not in new_flat:
-                    change_type = 'REMOVE'
-                elif old_val != new_val:
-                    change_type = 'CHANGE'
+            old_val = global_old_flat.get(key)
+            new_val = global_new_flat.get(key)
 
-                if change_type:
-                    if parent not in _cached_diff["inputs"]:
-                        _cached_diff["inputs"][parent] = {}
-                    if node not in _cached_diff["inputs"][parent]:
-                        _cached_diff["inputs"][parent][node] = []
+            change_type = None
+            if key not in global_old_flat:
+                change_type = 'ADD'
+            elif key not in global_new_flat:
+                change_type = 'REMOVE'
+            elif old_val != new_val:
+                change_type = 'CHANGE'
 
-                    _cached_diff["inputs"][parent][node].append((inp, change_type, old_val, new_val))
+            if change_type:
+                if parent not in _cached_diff["inputs"]:
+                    _cached_diff["inputs"][parent] = {}
+                if node not in _cached_diff["inputs"][parent]:
+                    _cached_diff["inputs"][parent][node] = []
+
+                _cached_diff["inputs"][parent][node].append((inp, change_type, old_val, new_val))
 
         if _cached_diff["meshes"] or _cached_diff["trees"] or _cached_diff["inputs"]:
             _cached_diff["has_changes"] = True
@@ -364,40 +397,44 @@ class GeoNodesExporterCollection(bpy.types.PropertyGroup):
 # OPERATORS & HANDLERS
 # ==============================================================================
 
-class GEONODES_JSON_OT_export(bpy.types.Operator):
+class GEONODES_JSON_OT_export(bpy.types.Operator, ExportHelper):
     bl_idname = "geonodes_json.export"
     bl_label = "Export Node Inputs to JSON"
-    bl_description = "Extracts all inputs from configured nodes and saves to JSON"
+    bl_description = "Extracts all inputs from configured nodes and saves to a specific JSON file"
+
+    filename_ext = ".json"
+    filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
 
     def execute(self, context):
-        groups = context.scene.geonodes_json_exporter_groups
-        collections = context.scene.geonodes_json_exporter_collections
-        filepath = bpy.path.abspath(context.scene.geonodes_json_export_path)
-
         try:
-            export_nodes_to_json(groups, collections, filepath, context)
-            update_cached_diff(filepath)
-            self.report({'INFO'}, f"Successfully exported to {filepath}")
+            export_nodes_to_json(self.filepath)
+
+            tracking_path = get_tracking_filepath()
+            if tracking_path:
+                update_cached_diff(tracking_path)
+                trigger_ui_redraw()
+
+            self.report({'INFO'}, f"Successfully exported to {self.filepath}")
         except Exception as e:
             self.report({'ERROR'}, f"Export failed: {str(e)}")
             return {'CANCELLED'}
 
         return {'FINISHED'}
 
-class GEONODES_JSON_OT_import(bpy.types.Operator):
+class GEONODES_JSON_OT_import(bpy.types.Operator, ImportHelper):
     bl_idname = "geonodes_json.import"
     bl_label = "Import Node Inputs from JSON"
     bl_description = "Applies stored inputs from JSON to configured nodes"
     bl_options = {'REGISTER', 'UNDO'}
 
-    def execute(self, context):
-        groups = context.scene.geonodes_json_exporter_groups
-        filepath = bpy.path.abspath(context.scene.geonodes_json_export_path)
+    filename_ext = ".json"
+    filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
 
+    def execute(self, context):
         try:
-            import_nodes_from_json(groups, filepath)
+            import_nodes_from_json(self.filepath)
             context.view_layer.update()
-            self.report({'INFO'}, f"Successfully imported from {filepath}")
+            self.report({'INFO'}, f"Successfully imported from {self.filepath}")
         except Exception as e:
             self.report({'ERROR'}, f"Import failed: {str(e)}")
             return {'CANCELLED'}
@@ -434,15 +471,12 @@ def auto_export_handler(dummy):
     if not getattr(context.scene, "geonodes_json_auto_export", False):
         return
 
-    groups = getattr(context.scene, "geonodes_json_exporter_groups", None)
-    collections = getattr(context.scene, "geonodes_json_exporter_collections", None)
-    path = getattr(context.scene, "geonodes_json_export_path", "")
-    if not groups or not path:
+    filepath = get_tracking_filepath()
+    if not filepath:
         return
 
-    filepath = bpy.path.abspath(path)
     try:
-        export_nodes_to_json(groups, collections, filepath, context)
+        export_nodes_to_json(filepath)
         update_cached_diff(filepath)
         trigger_ui_redraw()
     except Exception:
@@ -450,10 +484,8 @@ def auto_export_handler(dummy):
 
 @bpy.app.handlers.persistent
 def load_post_handler(dummy):
-    context = bpy.context
-    path = getattr(context.scene, "geonodes_json_export_path", "")
-    if path:
-        filepath = bpy.path.abspath(path)
+    filepath = get_tracking_filepath()
+    if filepath:
         update_cached_diff(filepath)
         trigger_ui_redraw()
 
@@ -467,8 +499,13 @@ def draw_git_diff(layout):
     box = layout.box()
     box.label(text="Structural Changes (Uncommitted):", icon='FILE_TEXT')
 
+    tracking_file = get_tracking_filepath()
+    if not tracking_file:
+        box.label(text="Save the .blend file to enable auto-tracking.", icon='INFO')
+        return
+
     if _cached_diff is None:
-        box.label(text="Save file or press Export to generate diff.", icon='INFO')
+        box.label(text="Press Save or Export to generate diff.", icon='INFO')
         return
 
     if _cached_diff["status"] == "NO_FILE":
@@ -479,7 +516,7 @@ def draw_git_diff(layout):
         box.label(text="File not yet in Git or no previous commit.", icon='INFO')
         return
     elif _cached_diff["status"] == "INVALID_JSON":
-        box.label(text="Committed file is not valid JSON.", icon='ERROR')
+        box.label(text="Committed tracking file is not valid JSON.", icon='ERROR')
         return
     elif _cached_diff["status"] == "ERROR":
         box.label(text=f"Diff Error: {_cached_diff['msg']}", icon='ERROR')
@@ -590,7 +627,6 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        layout.prop(scene, "geonodes_json_export_path")
         layout.prop(scene, "geonodes_json_auto_export")
 
         groups = scene.geonodes_json_exporter_groups
@@ -671,14 +707,9 @@ def register():
 
     bpy.types.Scene.geonodes_json_exporter_groups = bpy.props.CollectionProperty(type=GeoNodesExporterNodeGroup)
     bpy.types.Scene.geonodes_json_exporter_collections = bpy.props.CollectionProperty(type=GeoNodesExporterCollection)
-    bpy.types.Scene.geonodes_json_export_path = bpy.props.StringProperty(
-        name="Export Filepath",
-        subtype='FILE_PATH',
-        default="//node_inputs.json"
-    )
     bpy.types.Scene.geonodes_json_auto_export = bpy.props.BoolProperty(
         name="Auto-Export on Save",
-        description="Automatically export JSON when saving the blend file",
+        description="Automatically export tracking.json when saving the blend file",
         default=True
     )
 
@@ -694,7 +725,6 @@ def unregister():
         bpy.app.handlers.load_post.remove(load_post_handler)
 
     del bpy.types.Scene.geonodes_json_auto_export
-    del bpy.types.Scene.geonodes_json_export_path
     del bpy.types.Scene.geonodes_json_exporter_collections
     del bpy.types.Scene.geonodes_json_exporter_groups
 
