@@ -3,6 +3,13 @@ import json
 import os
 import hashlib
 import array
+import subprocess
+
+# ==============================================================================
+# GLOBALS & CACHE
+# ==============================================================================
+
+_cached_diff = None
 
 # ==============================================================================
 # CORE LOGIC
@@ -14,44 +21,43 @@ def get_node_tree_topology(node_tree):
         if link.from_node and link.to_node:
             valid_links.append(link)
 
-    # Sort primarily by the socket names
     valid_links.sort(key=lambda l: (l.from_socket.name, l.to_socket.name, l.from_node.name, l.to_node.name))
 
     links = []
     for link in valid_links:
-        # Using a clean format for easy readability in git diffs
-        l_str = f"{link.from_node.name}:{link.from_socket.name} -> {link.to_node.name}:{link.to_socket.name}"
+        l_str = f"[{link.from_node.name}] {link.from_socket.name} -> {link.to_socket.name} [{link.to_node.name}]"
         links.append(l_str)
 
     return links
 
-def extract_meshes_state(context):
+def extract_meshes_state(context, collections):
     state = {}
     if not context:
         return state
 
-    for obj in context.scene.objects:
-        if obj.type == 'MESH' and obj.data:
-            hasher = hashlib.md5()
+    target_objects = set()
+    for coll_item in collections:
+        coll = coll_item.collection_ptr
+        if coll:
+            for obj in coll.all_objects:
+                if obj.type == 'MESH' and obj.data:
+                    target_objects.add(obj)
 
-            # Include base object location
-            loc = f"{obj.location[0]:.4f}_{obj.location[1]:.4f}_{obj.location[2]:.4f}"
-            hasher.update(loc.encode('utf-8'))
+    for obj in target_objects:
+        hasher = hashlib.md5()
+        loc = f"{obj.location[0]:.4f}_{obj.location[1]:.4f}_{obj.location[2]:.4f}"
+        hasher.update(loc.encode('utf-8'))
 
-            # Include exact vertex positions using high-performance C API
-            mesh = obj.data
-            num_verts = len(mesh.vertices)
-            if num_verts > 0:
-                coords = [0.0] * (num_verts * 3)
-                mesh.vertices.foreach_get("co", coords)
+        mesh = obj.data
+        num_verts = len(mesh.vertices)
+        if num_verts > 0:
+            coords = [0.0] * (num_verts * 3)
+            mesh.vertices.foreach_get("co", coords)
+            float_arr = array.array('f', coords)
+            hasher.update(float_arr.tobytes())
 
-                # Convert float list to bytes instantly
-                float_arr = array.array('f', coords)
-                hasher.update(float_arr.tobytes())
+        state[obj.name] = hasher.hexdigest()
 
-            state[obj.name] = hasher.hexdigest()
-
-    # Sort the dictionary by object name to guarantee clean git diffs
     return {k: state[k] for k in sorted(state.keys())}
 
 def format_value(val, decimals=4):
@@ -107,14 +113,13 @@ def extract_node_tree_data(node_tree, current_depth, max_depth, groups_only=Fals
 
     return ng_data
 
-def export_nodes_to_json(groups, filepath, context=None):
+def export_nodes_to_json(groups, collections, filepath, context=None):
     result = {
         "tracked_inputs": {},
-        "meshes": extract_meshes_state(context),
+        "meshes": extract_meshes_state(context, collections),
         "all_node_trees": {}
     }
 
-    # 1. Automatically track topology of EVERY node group in the file
     unsorted_trees = {}
     for ng in bpy.data.node_groups:
         unsorted_trees[ng.name] = get_node_tree_topology(ng)
@@ -122,7 +127,6 @@ def export_nodes_to_json(groups, filepath, context=None):
     for name in sorted(unsorted_trees.keys()):
         result["all_node_trees"][name] = unsorted_trees[name]
 
-    # 2. Extract inputs for the explicitly configured groups
     unsorted_inputs = {}
     for i, ng in enumerate(groups):
         if not ng.group_ptr:
@@ -142,7 +146,7 @@ def set_node_input_value(socket, val):
     try:
         current_val = socket.default_value
         if hasattr(current_val, "name") and isinstance(val, str):
-            pass # Skip ID block lookups for safety
+            pass
         else:
             if get_node_input_value(socket) == val:
                 return
@@ -184,7 +188,6 @@ def import_nodes_from_json(groups, filepath):
     with open(filepath, 'r') as f:
         data = json.load(f)
 
-    # Backwards compatibility: support v3, v2, and v1 formats
     if "tracked_inputs" in data:
         input_data = data["tracked_inputs"]
     elif "node_groups" in data:
@@ -197,8 +200,6 @@ def import_nodes_from_json(groups, filepath):
             continue
 
         group_info = input_data[ng.group_ptr.name]
-
-        # Handle the intermediate v2 format where it was nested under "nodes"
         if isinstance(group_info, dict) and "nodes" in group_info:
             ng_data = group_info["nodes"]
         else:
@@ -206,6 +207,115 @@ def import_nodes_from_json(groups, filepath):
 
         apply_node_tree_data(ng.group_ptr, ng_data, 0, ng.depth, ng.groups_only)
 
+# ==============================================================================
+# GIT DIFF PARSING
+# ==============================================================================
+
+def update_cached_diff(filepath):
+    global _cached_diff
+    _cached_diff = {
+        "status": "OK",
+        "msg": "",
+        "has_changes": False,
+        "meshes": [],
+        "trees": {},
+        "inputs": {}
+    }
+
+    if not filepath or not os.path.exists(filepath):
+        _cached_diff["status"] = "NO_FILE"
+        return
+
+    dir_path = os.path.dirname(filepath) or "."
+    file_name = os.path.basename(filepath)
+
+    try:
+        repo_check = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=dir_path, capture_output=True, text=True)
+        if repo_check.returncode != 0:
+            _cached_diff["status"] = "NO_REPO"
+            return
+
+        head_show = subprocess.run(["git", "show", f"HEAD:./{file_name}"], cwd=dir_path, capture_output=True, text=True)
+        if head_show.returncode != 0:
+            _cached_diff["status"] = "NO_COMMIT"
+            return
+
+        try:
+            committed_data = json.loads(head_show.stdout)
+        except json.JSONDecodeError:
+            _cached_diff["status"] = "INVALID_JSON"
+            return
+
+        with open(filepath, 'r') as f:
+            current_data = json.load(f)
+
+        # 1. Compare Meshes
+        old_meshes = committed_data.get("meshes", {})
+        new_meshes = current_data.get("meshes", {})
+        for obj in sorted(new_meshes.keys()):
+            if obj not in old_meshes:
+                _cached_diff["meshes"].append((obj, 'ADD'))
+            elif new_meshes[obj] != old_meshes[obj]:
+                _cached_diff["meshes"].append((obj, 'FILE_REFRESH'))
+        for obj in sorted(old_meshes.keys()):
+            if obj not in new_meshes:
+                _cached_diff["meshes"].append((obj, 'REMOVE'))
+
+        # 2. Compare Node Trees
+        old_trees = committed_data.get("all_node_trees", {})
+        new_trees = current_data.get("all_node_trees", {})
+        all_tree_names = sorted(set(old_trees.keys()).union(set(new_trees.keys())))
+
+        for tree_name in all_tree_names:
+            old_links = set(old_trees.get(tree_name, []))
+            new_links = set(new_trees.get(tree_name, []))
+
+            added = sorted(new_links - old_links)
+            removed = sorted(old_links - new_links)
+
+            if added or removed:
+                _cached_diff["trees"][tree_name] = {
+                    "added": added,
+                    "removed": removed
+                }
+
+        # 3. Tracked Inputs
+        old_inputs = committed_data.get("tracked_inputs", {})
+        new_inputs = current_data.get("tracked_inputs", {})
+        all_input_groups = sorted(set(old_inputs.keys()).union(set(new_inputs.keys())))
+
+        for group in all_input_groups:
+            old_nodes = old_inputs.get(group, {})
+            new_nodes = new_inputs.get(group, {})
+
+            group_changes = []
+            all_nodes = sorted(set(old_nodes.keys()).union(set(new_nodes.keys())))
+            for node in all_nodes:
+                if node not in old_nodes:
+                    group_changes.append((node, 'ADD'))
+                elif node not in new_nodes:
+                    group_changes.append((node, 'REMOVE'))
+                elif old_nodes[node] != new_nodes[node]:
+                    group_changes.append((node, 'FILE_REFRESH'))
+
+            if group_changes:
+                _cached_diff["inputs"][group] = group_changes
+
+        if _cached_diff["meshes"] or _cached_diff["trees"] or _cached_diff["inputs"]:
+            _cached_diff["has_changes"] = True
+
+    except Exception as e:
+        _cached_diff["status"] = "ERROR"
+        _cached_diff["msg"] = str(e)
+
+
+def trigger_ui_redraw():
+    """Forces the 3D Viewport to redraw instantly, bypassing the need for mouse movement."""
+    if bpy.context and hasattr(bpy.context, "window_manager"):
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
 
 # ==============================================================================
 # PROPERTIES
@@ -216,9 +326,12 @@ class GeoNodesExporterNodeGroup(bpy.types.PropertyGroup):
     depth: bpy.props.IntProperty(name="Depth", default=0, min=0)  # type: ignore
     groups_only: bpy.props.BoolProperty(name="Groups Only", default=False)  # type: ignore
 
+class GeoNodesExporterCollection(bpy.types.PropertyGroup):
+    collection_ptr: bpy.props.PointerProperty(type=bpy.types.Collection, name="Collection")  # type: ignore
+
 
 # ==============================================================================
-# OPERATORS
+# OPERATORS & HANDLERS
 # ==============================================================================
 
 class GEONODES_JSON_OT_export(bpy.types.Operator):
@@ -228,10 +341,12 @@ class GEONODES_JSON_OT_export(bpy.types.Operator):
 
     def execute(self, context):
         groups = context.scene.geonodes_json_exporter_groups
+        collections = context.scene.geonodes_json_exporter_collections
         filepath = bpy.path.abspath(context.scene.geonodes_json_export_path)
 
         try:
-            export_nodes_to_json(groups, filepath, context)
+            export_nodes_to_json(groups, collections, filepath, context)
+            update_cached_diff(filepath)
             self.report({'INFO'}, f"Successfully exported to {filepath}")
         except Exception as e:
             self.report({'ERROR'}, f"Export failed: {str(e)}")
@@ -251,10 +366,7 @@ class GEONODES_JSON_OT_import(bpy.types.Operator):
 
         try:
             import_nodes_from_json(groups, filepath)
-
-            # Force a single, full scene update after all values have been successfully set
             context.view_layer.update()
-
             self.report({'INFO'}, f"Successfully imported from {filepath}")
         except Exception as e:
             self.report({'ERROR'}, f"Import failed: {str(e)}")
@@ -268,15 +380,21 @@ class GEONODES_JSON_OT_actions(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     action: bpy.props.StringProperty()  # type: ignore
-    ng_idx: bpy.props.IntProperty(default=-1)  # type: ignore
+    item_idx: bpy.props.IntProperty(default=-1)  # type: ignore
+    list_type: bpy.props.StringProperty(default="GROUPS")  # type: ignore
 
     def execute(self, context):
-        groups = context.scene.geonodes_json_exporter_groups
+        scene = context.scene
 
-        if self.action == 'ADD_GROUP':
-            ng = groups.add()
-        elif self.action == 'DEL_GROUP':
-            groups.remove(self.ng_idx)
+        if self.list_type == 'GROUPS':
+            target_list = scene.geonodes_json_exporter_groups
+        else:
+            target_list = scene.geonodes_json_exporter_collections
+
+        if self.action == 'ADD':
+            target_list.add()
+        elif self.action == 'DEL':
+            target_list.remove(self.item_idx)
 
         return {'FINISHED'}
 
@@ -287,20 +405,105 @@ def auto_export_handler(dummy):
         return
 
     groups = getattr(context.scene, "geonodes_json_exporter_groups", None)
+    collections = getattr(context.scene, "geonodes_json_exporter_collections", None)
     path = getattr(context.scene, "geonodes_json_export_path", "")
     if not groups or not path:
         return
 
     filepath = bpy.path.abspath(path)
     try:
-        export_nodes_to_json(groups, filepath, context)
+        export_nodes_to_json(groups, collections, filepath, context)
+        update_cached_diff(filepath)
+        trigger_ui_redraw()
     except Exception:
         pass
 
+@bpy.app.handlers.persistent
+def load_post_handler(dummy):
+    context = bpy.context
+    path = getattr(context.scene, "geonodes_json_export_path", "")
+    if path:
+        filepath = bpy.path.abspath(path)
+        update_cached_diff(filepath)
+        trigger_ui_redraw()
 
 # ==============================================================================
 # USER INTERFACE
 # ==============================================================================
+
+def draw_git_diff(layout):
+    global _cached_diff
+
+    box = layout.box()
+    box.label(text="Structural Changes (Uncommitted):", icon='FILE_TEXT')
+
+    if _cached_diff is None:
+        box.label(text="Save file or press Export to generate diff.", icon='INFO')
+        return
+
+    if _cached_diff["status"] == "NO_FILE":
+        return
+    elif _cached_diff["status"] == "NO_REPO":
+        return
+    elif _cached_diff["status"] == "NO_COMMIT":
+        box.label(text="File not yet in Git or no previous commit.", icon='INFO')
+        return
+    elif _cached_diff["status"] == "INVALID_JSON":
+        box.label(text="Committed file is not valid JSON.", icon='ERROR')
+        return
+    elif _cached_diff["status"] == "ERROR":
+        box.label(text=f"Diff Error: {_cached_diff['msg']}", icon='ERROR')
+        return
+
+    if not _cached_diff["has_changes"]:
+        box.label(text="Working tree clean.", icon='CHECKMARK')
+        return
+
+    # Draw Meshes
+    if _cached_diff["meshes"]:
+        b = box.box()
+        b.label(text="Meshes", icon='MESH_DATA')
+        for msg, icon in _cached_diff["meshes"]:
+            b.label(text=msg, icon=icon)
+
+    # Draw Node Trees
+    for tree_name, tree_data in _cached_diff["trees"].items():
+        b = box.box()
+        b.label(text=tree_name, icon='NODETREE')
+
+        for link in tree_data["removed"]:
+            parts = link.split(" -> ")
+            if len(parts) == 2:
+                row = b.row(align=True)
+                row.alignment = 'LEFT'
+                row.label(text=parts[0][:50] + ("..." if len(parts[0]) > 50 else ""))
+                row.label(text="", icon='UNLINKED')
+                row.separator()
+                row.label(text=parts[1][:50] + ("..." if len(parts[1]) > 50 else ""))
+            else:
+                display = link[:100] + "..." if len(link) > 100 else link
+                b.label(text=display, icon='UNLINKED')
+
+        for link in tree_data["added"]:
+            parts = link.split(" -> ")
+            if len(parts) == 2:
+                row = b.row(align=True)
+                row.alignment = 'LEFT'
+                row.label(text=parts[0][:50] + ("..." if len(parts[0]) > 50 else ""))
+                row.label(text="", icon='LINKED')
+                row.separator()
+                row.label(text=parts[1][:50] + ("..." if len(parts[1]) > 50 else ""))
+            else:
+                display = link[:100] + "..." if len(link) > 100 else link
+                b.label(text=display, icon='LINKED')
+
+    # Draw Tracked Inputs
+    for group, inputs in _cached_diff["inputs"].items():
+        b = box.box()
+        b.label(text=group, icon='PREFERENCES')
+        for msg, icon in inputs:
+            b.label(text=msg, icon=icon)
+
 
 class GEONODES_JSON_PT_panel(bpy.types.Panel):
     bl_label = "Geometry Nodes JSON Exporter"
@@ -316,18 +519,21 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
         layout.prop(scene, "geonodes_json_auto_export")
 
         groups = scene.geonodes_json_exporter_groups
+        collections = scene.geonodes_json_exporter_collections
 
+        # --- Node Groups ---
         box = layout.box()
         header_row = box.row()
-        header_row.label(text="Node Groups")
+        header_row.label(text="Tracked Node Groups")
 
         op = header_row.operator("geonodes_json.actions", text="", icon='ADD')
-        op.action = 'ADD_GROUP'
+        op.action = 'ADD'
+        op.list_type = 'GROUPS'
 
         if len(groups) == 0:
             box.label(text="No groups added.")
 
-        for ng_idx, ng in enumerate(groups):
+        for idx, ng in enumerate(groups):
             ng_box = box.box()
             ng_row = ng_box.row(align=True)
 
@@ -336,14 +542,40 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
             ng_row.prop(ng, "groups_only", text="", icon='GROUP', toggle=True)
 
             op = ng_row.operator("geonodes_json.actions", text="", icon='TRASH')
-            op.action = 'DEL_GROUP'
-            op.ng_idx = ng_idx
+            op.action = 'DEL'
+            op.item_idx = idx
+            op.list_type = 'GROUPS'
+
+        # --- Collections ---
+        coll_box = layout.box()
+        coll_header = coll_box.row()
+        coll_header.label(text="Tracked Collections (Meshes)")
+
+        op = coll_header.operator("geonodes_json.actions", text="", icon='ADD')
+        op.action = 'ADD'
+        op.list_type = 'COLLECTIONS'
+
+        if len(collections) == 0:
+            coll_box.label(text="No collections added.")
+
+        for idx, coll_item in enumerate(collections):
+            row = coll_box.row(align=True)
+            row.prop(coll_item, "collection_ptr", text="")
+
+            op = row.operator("geonodes_json.actions", text="", icon='TRASH')
+            op.action = 'DEL'
+            op.item_idx = idx
+            op.list_type = 'COLLECTIONS'
 
         layout.separator()
         row = layout.row(align=True)
         row.operator("geonodes_json.export", icon='EXPORT')
         row.operator("geonodes_json.import", icon='IMPORT')
 
+        layout.separator()
+
+        # --- Git Diff Display ---
+        draw_git_diff(layout)
 
 # ==============================================================================
 # REGISTRATION
@@ -351,6 +583,7 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
 
 classes = (
     GeoNodesExporterNodeGroup,
+    GeoNodesExporterCollection,
     GEONODES_JSON_OT_export,
     GEONODES_JSON_OT_import,
     GEONODES_JSON_OT_actions,
@@ -362,6 +595,7 @@ def register():
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.geonodes_json_exporter_groups = bpy.props.CollectionProperty(type=GeoNodesExporterNodeGroup)
+    bpy.types.Scene.geonodes_json_exporter_collections = bpy.props.CollectionProperty(type=GeoNodesExporterCollection)
     bpy.types.Scene.geonodes_json_export_path = bpy.props.StringProperty(
         name="Export Filepath",
         subtype='FILE_PATH',
@@ -375,13 +609,18 @@ def register():
 
     if auto_export_handler not in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.append(auto_export_handler)
+    if load_post_handler not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(load_post_handler)
 
 def unregister():
     if auto_export_handler in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.remove(auto_export_handler)
+    if load_post_handler in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(load_post_handler)
 
     del bpy.types.Scene.geonodes_json_auto_export
     del bpy.types.Scene.geonodes_json_export_path
+    del bpy.types.Scene.geonodes_json_exporter_collections
     del bpy.types.Scene.geonodes_json_exporter_groups
 
     for cls in reversed(classes):
