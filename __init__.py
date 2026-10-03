@@ -10,8 +10,8 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 # UI CONFIGURATION
 # ==============================================================================
 
-UI_INDENT = 0.04    # Left indentation for nested elements (lower = less indent)
-UI_SPACING = 0.8    # Line spacing/compactness for items (lower = more compact)
+UI_INDENT = 0.02    # Left indentation for nested elements (lower = less indent)
+UI_SPACING = 0.5    # Line spacing/compactness for items (lower = more compact)
 
 # ==============================================================================
 # GLOBALS & CACHE
@@ -399,11 +399,21 @@ class GeoNodesExporterCollection(bpy.types.PropertyGroup):
 
 class GEONODES_JSON_OT_export(bpy.types.Operator, ExportHelper):
     bl_idname = "geonodes_json.export"
-    bl_label = "Export Node Inputs to JSON"
+    bl_label = "Export tracking to JSON"
     bl_description = "Extracts all inputs from configured nodes and saves to a specific JSON file"
 
     filename_ext = ".json"
     filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        blend_filepath = context.blend_data.filepath
+        if blend_filepath:
+            self.filepath = os.path.join(os.path.dirname(blend_filepath), "tracking.json")
+        else:
+            self.filepath = "tracking.json"
+
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
 
     def execute(self, context):
         try:
@@ -423,12 +433,22 @@ class GEONODES_JSON_OT_export(bpy.types.Operator, ExportHelper):
 
 class GEONODES_JSON_OT_import(bpy.types.Operator, ImportHelper):
     bl_idname = "geonodes_json.import"
-    bl_label = "Import Node Inputs from JSON"
+    bl_label = "Import input values from JSON"
     bl_description = "Applies stored inputs from JSON to configured nodes"
     bl_options = {'REGISTER', 'UNDO'}
 
     filename_ext = ".json"
     filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        blend_filepath = context.blend_data.filepath
+        if blend_filepath:
+            self.filepath = os.path.join(os.path.dirname(blend_filepath), "tracking.json")
+        else:
+            self.filepath = "tracking.json"
+
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
 
     def execute(self, context):
         try:
@@ -467,10 +487,6 @@ class GEONODES_JSON_OT_actions(bpy.types.Operator):
 
 @bpy.app.handlers.persistent
 def auto_export_handler(dummy):
-    context = bpy.context
-    if not getattr(context.scene, "geonodes_json_auto_export", False):
-        return
-
     filepath = get_tracking_filepath()
     if not filepath:
         return
@@ -534,7 +550,9 @@ def draw_git_diff(layout):
 
         for parent, nodes in _cached_diff["inputs"].items():
             pb = main_inputs_box.box()
-            pb.label(text=parent, icon='NODETREE')
+            pb_row = pb.row()
+            pb_row.scale_y = UI_SPACING
+            pb_row.label(text=parent, icon='NODETREE')
 
             for node, changes in nodes.items():
                 nsplit = pb.split(factor=UI_INDENT)
@@ -627,8 +645,6 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        layout.prop(scene, "geonodes_json_auto_export")
-
         groups = scene.geonodes_json_exporter_groups
         collections = scene.geonodes_json_exporter_collections
 
@@ -707,11 +723,6 @@ def register():
 
     bpy.types.Scene.geonodes_json_exporter_groups = bpy.props.CollectionProperty(type=GeoNodesExporterNodeGroup)
     bpy.types.Scene.geonodes_json_exporter_collections = bpy.props.CollectionProperty(type=GeoNodesExporterCollection)
-    bpy.types.Scene.geonodes_json_auto_export = bpy.props.BoolProperty(
-        name="Auto-Export on Save",
-        description="Automatically export tracking.json when saving the blend file",
-        default=True
-    )
 
     if auto_export_handler not in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.append(auto_export_handler)
@@ -724,7 +735,6 @@ def unregister():
     if load_post_handler in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(load_post_handler)
 
-    del bpy.types.Scene.geonodes_json_auto_export
     del bpy.types.Scene.geonodes_json_exporter_collections
     del bpy.types.Scene.geonodes_json_exporter_groups
 
