@@ -6,6 +6,13 @@ import array
 import subprocess
 
 # ==============================================================================
+# UI CONFIGURATION
+# ==============================================================================
+
+UI_INDENT = 0.03    # Left indentation for nested elements (lower = less indent)
+UI_SPACING = 0.6    # Line spacing/compactness for items (lower = more compact)
+
+# ==============================================================================
 # GLOBALS & CACHE
 # ==============================================================================
 
@@ -284,22 +291,46 @@ def update_cached_diff(filepath):
         new_inputs = current_data.get("tracked_inputs", {})
         all_input_groups = sorted(set(old_inputs.keys()).union(set(new_inputs.keys())))
 
+        def flatten_inputs_dict(nd, p=""):
+            f = {}
+            for n, c in nd.items():
+                if isinstance(c, dict):
+                    for k, v in c.items():
+                        if isinstance(v, dict):
+                            f.update(flatten_inputs_dict({k: v}, p=n))
+                        else:
+                            f[(p, n, k)] = v
+            return f
+
         for group in all_input_groups:
             old_nodes = old_inputs.get(group, {})
             new_nodes = new_inputs.get(group, {})
 
-            group_changes = []
-            all_nodes = sorted(set(old_nodes.keys()).union(set(new_nodes.keys())))
-            for node in all_nodes:
-                if node not in old_nodes:
-                    group_changes.append((node, 'ADD'))
-                elif node not in new_nodes:
-                    group_changes.append((node, 'REMOVE'))
-                elif old_nodes[node] != new_nodes[node]:
-                    group_changes.append((node, 'FILE_REFRESH'))
+            old_flat = flatten_inputs_dict(old_nodes, p=group)
+            new_flat = flatten_inputs_dict(new_nodes, p=group)
 
-            if group_changes:
-                _cached_diff["inputs"][group] = group_changes
+            all_keys = sorted(set(old_flat.keys()).union(set(new_flat.keys())))
+            for key in all_keys:
+                parent, node, inp = key
+
+                old_val = old_flat.get(key)
+                new_val = new_flat.get(key)
+
+                change_type = None
+                if key not in old_flat:
+                    change_type = 'ADD'
+                elif key not in new_flat:
+                    change_type = 'REMOVE'
+                elif old_val != new_val:
+                    change_type = 'CHANGE'
+
+                if change_type:
+                    if parent not in _cached_diff["inputs"]:
+                        _cached_diff["inputs"][parent] = {}
+                    if node not in _cached_diff["inputs"][parent]:
+                        _cached_diff["inputs"][parent][node] = []
+
+                    _cached_diff["inputs"][parent][node].append((inp, change_type, old_val, new_val))
 
         if _cached_diff["meshes"] or _cached_diff["trees"] or _cached_diff["inputs"]:
             _cached_diff["has_changes"] = True
@@ -310,7 +341,6 @@ def update_cached_diff(filepath):
 
 
 def trigger_ui_redraw():
-    """Forces the 3D Viewport to redraw instantly, bypassing the need for mouse movement."""
     if bpy.context and hasattr(bpy.context, "window_manager"):
         for window in bpy.context.window_manager.windows:
             for area in window.screen.areas:
@@ -459,50 +489,95 @@ def draw_git_diff(layout):
         box.label(text="Working tree clean.", icon='CHECKMARK')
         return
 
-    # Draw Meshes
+    # 1. Inputs Block
+    if _cached_diff["inputs"]:
+        total_inputs_changed = sum(len(changes) for nodes in _cached_diff["inputs"].values() for changes in nodes.values())
+        main_inputs_box = box.box()
+        main_inputs_box.label(text=f"Inputs ({total_inputs_changed} inputs changed)", icon='PREFERENCES')
+
+        for parent, nodes in _cached_diff["inputs"].items():
+            pb = main_inputs_box.box()
+            pb.label(text=parent, icon='NODETREE')
+
+            for node, changes in nodes.items():
+                nsplit = pb.split(factor=UI_INDENT)
+                nsplit.column()
+                nb = nsplit.column().box()
+
+                nb_row = nb.row()
+                nb_row.scale_y = UI_SPACING
+                nb_row.label(text=node, icon='NODE')
+
+                isplit = nb.split(factor=UI_INDENT)
+                isplit.column()
+                ib = isplit.column().box()
+
+                for inp, change_type, old_val, new_val in changes:
+                    row = ib.row(align=True)
+                    row.scale_y = UI_SPACING
+                    row.alignment = 'LEFT'
+
+                    if change_type == 'ADD':
+                        row.label(text=f"{inp}: {new_val}", icon='ADD')
+                    elif change_type == 'REMOVE':
+                        row.label(text=f"{inp}: {old_val}", icon='REMOVE')
+                    elif change_type == 'CHANGE':
+                        row.label(text=f"{inp}:", icon='DOT')
+                        row.label(text=str(old_val))
+                        row.label(text="", icon='FORWARD')
+                        row.label(text=str(new_val))
+
+    # 2. Meshes Block
     if _cached_diff["meshes"]:
-        b = box.box()
-        b.label(text="Meshes", icon='MESH_DATA')
+        main_meshes_box = box.box()
+        obj_count = len(_cached_diff["meshes"])
+        main_meshes_box.label(text=f"Meshes ({obj_count} objects changed)", icon='MESH_DATA')
+
         for msg, icon in _cached_diff["meshes"]:
-            b.label(text=msg, icon=icon)
+            mesh_box = main_meshes_box.box()
+            mesh_box.scale_y = UI_SPACING
+            mesh_box.label(text=msg, icon=icon)
 
-    # Draw Node Trees
-    for tree_name, tree_data in _cached_diff["trees"].items():
-        b = box.box()
-        b.label(text=tree_name, icon='NODETREE')
+    # 3. Links Block
+    if _cached_diff["trees"]:
+        total_added = sum(len(t["added"]) for t in _cached_diff["trees"].values())
+        total_removed = sum(len(t["removed"]) for t in _cached_diff["trees"].values())
+        main_links_box = box.box()
+        main_links_box.label(text=f"Links ({total_added} added, {total_removed} removed)", icon='LINKED')
 
-        for link in tree_data["removed"]:
-            parts = link.split(" -> ")
-            if len(parts) == 2:
-                row = b.row(align=True)
-                row.alignment = 'LEFT'
-                row.label(text=parts[0][:50] + ("..." if len(parts[0]) > 50 else ""))
-                row.label(text="", icon='UNLINKED')
-                row.separator()
-                row.label(text=parts[1][:50] + ("..." if len(parts[1]) > 50 else ""))
-            else:
-                display = link[:100] + "..." if len(link) > 100 else link
-                b.label(text=display, icon='UNLINKED')
+        for tree_name, tree_data in _cached_diff["trees"].items():
+            b = main_links_box.box()
+            b.label(text=tree_name, icon='NODETREE')
 
-        for link in tree_data["added"]:
-            parts = link.split(" -> ")
-            if len(parts) == 2:
-                row = b.row(align=True)
-                row.alignment = 'LEFT'
-                row.label(text=parts[0][:50] + ("..." if len(parts[0]) > 50 else ""))
-                row.label(text="", icon='LINKED')
-                row.separator()
-                row.label(text=parts[1][:50] + ("..." if len(parts[1]) > 50 else ""))
-            else:
-                display = link[:100] + "..." if len(link) > 100 else link
-                b.label(text=display, icon='LINKED')
+            for link in tree_data["removed"]:
+                link_box = b.box()
+                link_box.scale_y = UI_SPACING
+                parts = link.split(" -> ")
+                if len(parts) == 2:
+                    row = link_box.row(align=True)
+                    row.alignment = 'LEFT'
+                    row.label(text=parts[0][:50] + ("..." if len(parts[0]) > 50 else ""))
+                    row.label(text="", icon='UNLINKED')
+                    row.separator()
+                    row.label(text=parts[1][:50] + ("..." if len(parts[1]) > 50 else ""))
+                else:
+                    display = link[:100] + "..." if len(link) > 100 else link
+                    link_box.label(text=display, icon='UNLINKED')
 
-    # Draw Tracked Inputs
-    for group, inputs in _cached_diff["inputs"].items():
-        b = box.box()
-        b.label(text=group, icon='PREFERENCES')
-        for msg, icon in inputs:
-            b.label(text=msg, icon=icon)
+            for link in tree_data["added"]:
+                link_box = b.box()
+                link_box.scale_y = UI_SPACING
+                parts = link.split(" -> ")
+                if len(parts) == 2:
+                    row = link_box.row(align=True)
+                    row.alignment = 'LEFT'
+                    row.label(text=parts[0][:50] + ("..." if len(parts[0]) > 50 else ""))
+                    row.label(text="", icon='LINKED')
+                    row.separator()
+                    row.label(text=parts[1][:50] + ("..." if len(parts[1]) > 50 else ""))
+                else:
+                    display = link[:100] + "..." if len(link) > 100 else link
+                    link_box.label(text=display, icon='LINKED')
 
 
 class GEONODES_JSON_PT_panel(bpy.types.Panel):
@@ -539,7 +614,7 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
 
             ng_row.prop(ng, "group_ptr", text="")
             ng_row.prop(ng, "depth", text="Depth")
-            ng_row.prop(ng, "groups_only", text="", icon='GROUP', toggle=True)
+            ng_row.prop(ng, "groups_only", text="", icon='NODETREE', toggle=True)
 
             op = ng_row.operator("geonodes_json.actions", text="", icon='TRASH')
             op.action = 'DEL'
