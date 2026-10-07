@@ -11,7 +11,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 # ==============================================================================
 
 UI_INDENT = 0.02    # Left indentation for nested elements (lower = less indent)
-UI_SPACING = 0.5    # Line spacing/compactness for items (lower = more compact)
+UI_SPACING = 0.6    # Line spacing/compactness for items (lower = more compact)
 
 # ==============================================================================
 # GLOBALS & CACHE
