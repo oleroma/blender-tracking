@@ -10,7 +10,10 @@ A Blender extension designed to automatically extract and apply input values fro
 - **Multiple Group Configuration:** Supports queuing multiple Node Groups for batched extraction in a single pass.
 - **Recursive Extraction:** Specify a recursion depth to automatically drill down into nested Node Groups and extract their internal node configurations while preserving hierarchy.
 - **Filter Standard Nodes:** Optionally extract inputs strictly from node groups, ignoring basic utility or math nodes.
-- **Modern Architecture:** Built for Blender 4.2+ using the `blender_manifest.toml` extension system.
+- **Mesh Tracking:** Tracked collections have every mesh object hashed (world transform, vertex positions, edges, faces), so geometry changes show up as a one-line diff.
+- **Link Tracking:** The links of every node group in the file are exported, so rewiring shows up in the diff. Sockets with duplicate names (e.g. the three Math `Value` inputs) are told apart as `Value[0]`, `Value[1]`, `Value[2]`.
+- **Git Diff Panel:** When the tracking file lives in a git repository, the panel lists inputs, meshes and links that changed since `HEAD`.
+- **Modern Architecture:** Built for Blender 5.2+ using the `blender_manifest.toml` extension system.
 
 ## Usage
 1. Open the **GeoJSON** tab in the 3D Viewport side-panel (N-panel).
@@ -19,4 +22,13 @@ A Blender extension designed to automatically extract and apply input values fro
 4. Under **Tracking Enabled**, keep the default tracking file (`//tracking.json`, relative to the `.blend`) or change it. Untick **Tracking Enabled** to stop automatic export on save and the git diff display.
 5. In the same row as your added Node Group, set its **Recursion Depth** (0 for top-level only, 1 for nested groups inside, etc.).
 6. In that same row, toggle the **Groups Only** icon button if you want to skip standard nodes and only export group node inputs for that specific target.
-7. Click **Export Node Inputs to JSON** to save values, or **Import Node Inputs from JSON** to apply values from the file.
+7. Optionally add collections under **Tracked Collections** to track their mesh objects.
+8. Click **Export** to save the tracking file manually, or **Import** to apply the stored values. Import reports how many inputs were applied, unchanged, skipped (datablock missing in this file) or failed.
+
+## Notes
+- Settings (tracked groups and collections, **Tracking Enabled**, tracking file) are stored per scene. Export, import and auto-export use the active scene's settings.
+- If an automatic export fails, the error is shown in the panel and printed to the system console.
+- Float values are rounded to 4 decimals, so smaller edits are neither exported nor detected in the diff.
+- Object, collection, material, image and texture inputs are stored by name.
+- The tracking file carries a `version`. Files from older versions of the add-on can't be imported, and an older committed file is not diffed; commit a fresh export to continue.
+- Mesh hashes cover the stored mesh data and world transform, not the evaluated result of modifiers.

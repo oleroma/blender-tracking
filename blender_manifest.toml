@@ -7,5 +7,8 @@ tagline = "Exports Geometry Nodes inputs to JSON"
 maintainer = "Vibecoded"
 type = "add-on"
 
-blender_version_min = "4.2.0"
+blender_version_min = "5.2.0"
 license = ["SPDX:GPL-2.0-or-later"]
+
+[permissions]
+files = "Read and write the tracking JSON file"
