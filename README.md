@@ -12,11 +12,11 @@ A Blender extension designed to automatically extract and apply input values fro
 - **Filter Standard Nodes:** Optionally extract inputs strictly from node groups, ignoring basic utility or math nodes.
 - **Mesh Tracking:** Tracked collections have every mesh object hashed (world transform, vertex positions, edges, faces), so geometry changes show up as a one-line diff.
 - **Link Tracking:** The links of every node group in the file are exported, so rewiring shows up in the diff. Sockets with duplicate names (e.g. the three Math `Value` inputs) are told apart as `Value[0]`, `Value[1]`, `Value[2]`.
-- **Git Diff Panel:** When the tracking file lives in a git repository, the panel lists inputs, meshes and links that changed since `HEAD`.
+- **Git Diff Panel:** When the tracking file lives in a git repository, the collapsible **Structural Changes (Uncommitted)** panel lists inputs, meshes and links that changed since `HEAD`.
 - **Modern Architecture:** Built for Blender 5.2+ using the `blender_manifest.toml` extension system.
 
 ## Usage
-1. Open the **GeoJSON** tab in the 3D Viewport side-panel (N-panel).
+1. Open the **GeoJSON** tab in the 3D Viewport side-panel (N-panel). It has two collapsible panels: **Structural Changes (Uncommitted)** (the diff) and **Configuration** (targets, tracking settings, Export/Import).
 2. Click the `+` button to add a Node Group target.
 3. Select your desired Geometry Node tree in the `Node Group` property field.
 4. Under **Tracking Enabled**, keep the default tracking file (`//tracking.json`, relative to the `.blend`) or change it. Untick **Tracking Enabled** to stop automatic export on save and the git diff display.

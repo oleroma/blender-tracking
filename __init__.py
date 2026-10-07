@@ -722,7 +722,6 @@ DIFF_STATUS_MESSAGES = {
 
 def draw_git_diff(layout):
     box = layout.box()
-    box.label(text="Structural Changes (Uncommitted):", icon='FILE_TEXT')
 
     if not is_tracking_enabled():
         box.label(text="Tracking is disabled.", icon='INFO')
@@ -756,8 +755,17 @@ def draw_git_diff(layout):
     if _cached_diff["trees"]:
         draw_links_section(box)
 
-class GEONODES_JSON_PT_panel(bpy.types.Panel):
-    bl_label = "Geometry Nodes JSON Exporter"
+class GEONODES_JSON_PT_diff(bpy.types.Panel):
+    bl_label = "Structural Changes (Uncommitted)"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'GeoJSON'
+
+    def draw(self, context):
+        draw_git_diff(self.layout)
+
+class GEONODES_JSON_PT_config(bpy.types.Panel):
+    bl_label = "Configuration"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'GeoJSON'
@@ -838,11 +846,6 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
         row.operator("geonodes_json.export", icon='EXPORT')
         row.operator("geonodes_json.import", icon='IMPORT')
 
-        layout.separator()
-
-        # --- Git Diff Display ---
-        draw_git_diff(layout)
-
 # ==============================================================================
 # REGISTRATION
 # ==============================================================================
@@ -853,7 +856,8 @@ classes = (
     GEONODES_JSON_OT_export,
     GEONODES_JSON_OT_import,
     GEONODES_JSON_OT_actions,
-    GEONODES_JSON_PT_panel,
+    GEONODES_JSON_PT_diff,
+    GEONODES_JSON_PT_config,
 )
 
 def register():
