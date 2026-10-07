@@ -6,7 +6,7 @@ A Blender extension designed to automatically extract and apply input values fro
 - **Dynamic Node Traversal:** Automatically iterates over all internal nodes within targeted Geometry Node groups.
 - **Data Serialization:** Casts and extracts exposed values (including basic types, Vectors, and Colors) directly into JSON format.
 - **Bi-directional Integration:** Supports both exporting current node values to JSON and importing/applying values from JSON back to the nodes.
-- **Auto-Export on Save:** Automatically keeps your JSON synchronized by triggering an export whenever you save your Blender file.
+- **Auto-Export on Save:** When **Tracking Enabled** is on (the default), the tracking JSON is rewritten on every save of the Blender file. The path is configurable and defaults to `//tracking.json` (next to the `.blend`).
 - **Multiple Group Configuration:** Supports queuing multiple Node Groups for batched extraction in a single pass.
 - **Recursive Extraction:** Specify a recursion depth to automatically drill down into nested Node Groups and extract their internal node configurations while preserving hierarchy.
 - **Filter Standard Nodes:** Optionally extract inputs strictly from node groups, ignoring basic utility or math nodes.
@@ -16,8 +16,7 @@ A Blender extension designed to automatically extract and apply input values fro
 1. Open the **GeoJSON** tab in the 3D Viewport side-panel (N-panel).
 2. Click the `+` button to add a Node Group target.
 3. Select your desired Geometry Node tree in the `Node Group` property field.
-4. Set the target export filepath.
-5. Make sure **Auto-Export on Save** is toggled if you want automatic synchronization.
+4. Under **Tracking Enabled**, keep the default tracking file (`//tracking.json`, relative to the `.blend`) or change it. Untick **Tracking Enabled** to stop automatic export on save and the git diff display.
 5. In the same row as your added Node Group, set its **Recursion Depth** (0 for top-level only, 1 for nested groups inside, etc.).
 6. In that same row, toggle the **Groups Only** icon button if you want to skip standard nodes and only export group node inputs for that specific target.
 7. Click **Export Node Inputs to JSON** to save values, or **Import Node Inputs from JSON** to apply values from the file.

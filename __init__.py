@@ -19,11 +19,23 @@ UI_SPACING = 0.6    # Line spacing/compactness for items (lower = more compact)
 
 _cached_diff = None
 
-def get_tracking_filepath():
-    """Returns the path to tracking.json in the current blend file's directory."""
-    if not bpy.data.is_saved or not bpy.data.filepath:
+DEFAULT_TRACKING_PATH = "//tracking.json"  # relative to the .blend file
+
+def is_tracking_enabled(scene=None):
+    scene = scene or bpy.context.scene
+    return bool(scene) and scene.geonodes_json_exporter_enabled
+
+def get_tracking_filepath(scene=None):
+    """Returns the absolute tracking file path configured for the scene, or None if it can't be resolved."""
+    scene = scene or bpy.context.scene
+    if not scene:
         return None
-    return os.path.join(os.path.dirname(bpy.data.filepath), "tracking.json")
+    path = scene.geonodes_json_exporter_filepath.strip()
+    if not path:
+        return None
+    if path.startswith("//") and not bpy.data.filepath:
+        return None  # relative path needs a saved .blend
+    return os.path.normpath(bpy.path.abspath(path))
 
 # ==============================================================================
 # CORE LOGIC
@@ -392,6 +404,9 @@ class GeoNodesExporterNodeGroup(bpy.types.PropertyGroup):
 class GeoNodesExporterCollection(bpy.types.PropertyGroup):
     collection_ptr: bpy.props.PointerProperty(type=bpy.types.Collection, name="Collection")  # type: ignore
 
+def default_dialog_filepath():
+    return get_tracking_filepath() or "tracking.json"
+
 
 # ==============================================================================
 # OPERATORS & HANDLERS
@@ -406,12 +421,7 @@ class GEONODES_JSON_OT_export(bpy.types.Operator, ExportHelper):
     filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
 
     def invoke(self, context, event):
-        blend_filepath = context.blend_data.filepath
-        if blend_filepath:
-            self.filepath = os.path.join(os.path.dirname(blend_filepath), "tracking.json")
-        else:
-            self.filepath = "tracking.json"
-
+        self.filepath = default_dialog_filepath()
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
@@ -420,7 +430,8 @@ class GEONODES_JSON_OT_export(bpy.types.Operator, ExportHelper):
             export_nodes_to_json(self.filepath)
 
             tracking_path = get_tracking_filepath()
-            if tracking_path:
+            if (is_tracking_enabled() and tracking_path
+                    and os.path.normpath(self.filepath) == tracking_path):
                 update_cached_diff(tracking_path)
                 trigger_ui_redraw()
 
@@ -441,12 +452,7 @@ class GEONODES_JSON_OT_import(bpy.types.Operator, ImportHelper):
     filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
 
     def invoke(self, context, event):
-        blend_filepath = context.blend_data.filepath
-        if blend_filepath:
-            self.filepath = os.path.join(os.path.dirname(blend_filepath), "tracking.json")
-        else:
-            self.filepath = "tracking.json"
-
+        self.filepath = default_dialog_filepath()
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
@@ -487,6 +493,8 @@ class GEONODES_JSON_OT_actions(bpy.types.Operator):
 
 @bpy.app.handlers.persistent
 def auto_export_handler(dummy):
+    if not is_tracking_enabled():
+        return
     filepath = get_tracking_filepath()
     if not filepath:
         return
@@ -500,6 +508,8 @@ def auto_export_handler(dummy):
 
 @bpy.app.handlers.persistent
 def load_post_handler(dummy):
+    if not is_tracking_enabled():
+        return
     filepath = get_tracking_filepath()
     if filepath:
         update_cached_diff(filepath)
@@ -514,6 +524,10 @@ def draw_git_diff(layout):
 
     box = layout.box()
     box.label(text="Structural Changes (Uncommitted):", icon='FILE_TEXT')
+
+    if not is_tracking_enabled():
+        box.label(text="Tracking is disabled.", icon='INFO')
+        return
 
     tracking_file = get_tracking_filepath()
     if not tracking_file:
@@ -694,6 +708,13 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
             op.item_idx = idx
             op.list_type = 'COLLECTIONS'
 
+        # --- Tracking settings ---
+        track_box = layout.box()
+        track_box.prop(scene, "geonodes_json_exporter_enabled")
+        path_row = track_box.row()
+        path_row.active = scene.geonodes_json_exporter_enabled
+        path_row.prop(scene, "geonodes_json_exporter_filepath", text="")
+
         layout.separator()
         row = layout.row(align=True)
         row.operator("geonodes_json.export", icon='EXPORT')
@@ -723,6 +744,17 @@ def register():
 
     bpy.types.Scene.geonodes_json_exporter_groups = bpy.props.CollectionProperty(type=GeoNodesExporterNodeGroup)
     bpy.types.Scene.geonodes_json_exporter_collections = bpy.props.CollectionProperty(type=GeoNodesExporterCollection)
+    bpy.types.Scene.geonodes_json_exporter_enabled = bpy.props.BoolProperty(
+        name="Tracking Enabled",
+        description="Write the tracking file on every save and show its git diff",
+        default=True,
+    )
+    bpy.types.Scene.geonodes_json_exporter_filepath = bpy.props.StringProperty(
+        name="Tracking File",
+        description="Tracking JSON file written on save. '//' is relative to the .blend file",
+        subtype='FILE_PATH',
+        default=DEFAULT_TRACKING_PATH,
+    )
 
     if auto_export_handler not in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.append(auto_export_handler)
@@ -735,6 +767,8 @@ def unregister():
     if load_post_handler in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(load_post_handler)
 
+    del bpy.types.Scene.geonodes_json_exporter_filepath
+    del bpy.types.Scene.geonodes_json_exporter_enabled
     del bpy.types.Scene.geonodes_json_exporter_collections
     del bpy.types.Scene.geonodes_json_exporter_groups
 
