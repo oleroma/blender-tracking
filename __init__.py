@@ -62,23 +62,33 @@ def is_tracking_filepath(filepath, scene=None):
     tracking_path = get_tracking_filepath(scene)
     return bool(tracking_path) and os.path.normcase(os.path.normpath(filepath)) == os.path.normcase(tracking_path)
 
-def collect_tracked_groups(scene):
-    """Returns {NodeTree: {"depth", "groups_only"}} for the scene, merging duplicate entries of one tree."""
+def collect_tracked_groups():
+    """Returns {NodeTree: {"depth", "groups_only"}} for the targets of all scenes.
+
+    A tree tracked more than once gets the deepest depth, and groups_only only if every entry asks for it.
+    """
     merged = {}
-    for item in scene.geonodes_json_exporter_groups:
-        tree = item.group_ptr
-        if not tree:
-            continue
-        config = merged.get(tree)
-        if config is None:
-            merged[tree] = {"depth": item.depth, "groups_only": item.groups_only}
-        else:
-            config["depth"] = max(config["depth"], item.depth)
-            config["groups_only"] = config["groups_only"] and item.groups_only
+    for scene in bpy.data.scenes:
+        for item in scene.geonodes_json_exporter_groups:
+            tree = item.group_ptr
+            if not tree:
+                continue
+            config = merged.get(tree)
+            if config is None:
+                merged[tree] = {"depth": item.depth, "groups_only": item.groups_only}
+            else:
+                config["depth"] = max(config["depth"], item.depth)
+                config["groups_only"] = config["groups_only"] and item.groups_only
     return merged
 
-def collect_tracked_collections(scene):
-    return {item.collection_ptr for item in scene.geonodes_json_exporter_collections if item.collection_ptr}
+def collect_tracked_collections():
+    """Returns the set of collections tracked by any scene."""
+    return {
+        item.collection_ptr
+        for scene in bpy.data.scenes
+        for item in scene.geonodes_json_exporter_collections
+        if item.collection_ptr
+    }
 
 # ==============================================================================
 # CORE LOGIC
@@ -256,11 +266,12 @@ def apply_node_tree_data(node_tree, tree_data, current_depth, max_depth, groups_
         if is_group and node.node_tree and current_depth < max_depth:
             apply_node_tree_data(node.node_tree, entry.get("nodes"), current_depth + 1, max_depth, groups_only, stats)
 
-def export_nodes_to_json(filepath, scene):
+def export_nodes_to_json(filepath):
+    """Writes the tracking file for the targets of all scenes."""
     result = {
         "version": FORMAT_VERSION,
         "tracked_inputs": {},
-        "meshes": extract_meshes_state(collect_tracked_collections(scene)),
+        "meshes": extract_meshes_state(collect_tracked_collections()),
         "all_node_trees": {},
     }
 
@@ -270,7 +281,7 @@ def export_nodes_to_json(filepath, scene):
 
     tracked = {
         tree_key(tree): extract_node_tree_data(tree, 0, config["depth"], config["groups_only"])
-        for tree, config in collect_tracked_groups(scene).items()
+        for tree, config in collect_tracked_groups().items()
     }
     for name in sorted(tracked):
         result["tracked_inputs"][name] = tracked[name]
@@ -285,8 +296,8 @@ def export_nodes_to_json(filepath, scene):
         json.dump(result, f, indent=4)
     os.replace(temp_path, filepath)
 
-def import_nodes_from_json(filepath, scene):
-    """Applies stored inputs to the scene's tracked groups. Returns a Counter of per-input outcomes."""
+def import_nodes_from_json(filepath):
+    """Applies stored inputs to the tracked groups of all scenes. Returns a Counter of per-input outcomes."""
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"JSON file not found: {filepath}")
 
@@ -303,7 +314,7 @@ def import_nodes_from_json(filepath, scene):
     tracked_inputs = data.get("tracked_inputs", {})
     stats = Counter({'applied': 0, 'unchanged': 0, 'skipped': 0, 'failed': 0})
 
-    for tree, config in collect_tracked_groups(scene).items():
+    for tree, config in collect_tracked_groups().items():
         key = tree_key(tree)
         if key in tracked_inputs:
             apply_node_tree_data(tree, tracked_inputs[key], 0, config["depth"], config["groups_only"], stats)
@@ -485,7 +496,7 @@ class GEONODES_JSON_OT_export(bpy.types.Operator, ExportHelper):
     def execute(self, context):
         global _export_error
         try:
-            export_nodes_to_json(self.filepath, context.scene)
+            export_nodes_to_json(self.filepath)
 
             if is_tracking_enabled(context.scene) and is_tracking_filepath(self.filepath, context.scene):
                 _export_error = None
@@ -515,7 +526,7 @@ class GEONODES_JSON_OT_import(bpy.types.Operator, ImportHelper):
 
     def execute(self, context):
         try:
-            stats = import_nodes_from_json(self.filepath, context.scene)
+            stats = import_nodes_from_json(self.filepath)
         except Exception as e:
             self.report({'ERROR'}, f"Import failed: {str(e)}")
             return {'CANCELLED'}
@@ -526,7 +537,7 @@ class GEONODES_JSON_OT_import(bpy.types.Operator, ImportHelper):
         if stats['failed'] or stats['skipped']:
             self.report({'WARNING'}, f"Imported from {self.filepath}: {summary}")
         elif sum(stats.values()) == 0:
-            self.report({'WARNING'}, f"Nothing to import: no tracked node group of this scene matched {self.filepath}")
+            self.report({'WARNING'}, f"Nothing to import: no tracked node group matched {self.filepath}")
         else:
             self.report({'INFO'}, f"Imported from {self.filepath}: {summary}")
         return {'FINISHED'}
@@ -566,7 +577,7 @@ def auto_export_handler(dummy):
         return
 
     try:
-        export_nodes_to_json(filepath, scene)
+        export_nodes_to_json(filepath)
         _export_error = None
         update_cached_diff(filepath)
     except Exception as e:
@@ -803,6 +814,15 @@ class GEONODES_JSON_PT_panel(bpy.types.Panel):
             op.action = 'DEL'
             op.item_idx = idx
             op.list_type = 'COLLECTIONS'
+
+        other_scenes = [s for s in bpy.data.scenes if s != scene]
+        other_groups = sum(1 for s in other_scenes for g in s.geonodes_json_exporter_groups if g.group_ptr)
+        other_collections = sum(1 for s in other_scenes for c in s.geonodes_json_exporter_collections if c.collection_ptr)
+        if other_groups or other_collections:
+            layout.label(
+                text=f"Also tracked in other scenes: {other_groups} groups, {other_collections} collections",
+                icon='INFO',
+            )
 
         # --- Tracking settings ---
         track_box = layout.box()

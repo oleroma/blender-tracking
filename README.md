@@ -26,7 +26,8 @@ A Blender extension designed to automatically extract and apply input values fro
 8. Click **Export** to save the tracking file manually, or **Import** to apply the stored values. Import reports how many inputs were applied, unchanged, skipped (datablock missing in this file) or failed.
 
 ## Notes
-- Settings (tracked groups and collections, **Tracking Enabled**, tracking file) are stored per scene. Export, import and auto-export use the active scene's settings.
+- Tracked groups and collections are listed per scene, but the tracking file combines the targets of all scenes. Saving from any scene writes the complete file, and Import applies values to the tracked groups of all scenes. The panel shows a note when other scenes have targets.
+- **Tracking Enabled** and the tracking file path are also stored per scene; the active scene's values decide whether and where the file is written.
 - If an automatic export fails, the error is shown in the panel and printed to the system console.
 - Float values are rounded to 4 decimals, so smaller edits are neither exported nor detected in the diff.
 - Object, collection, material, image and texture inputs are stored by name.

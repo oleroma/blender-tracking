@@ -8,7 +8,7 @@ Blender extension (5.2+) that exports Geometry Nodes input values, node links an
 - No build step and no third-party dependencies beyond what Blender ships (`bpy`, `numpy`).
 
 ## How it works
-- Settings are per scene: `scene.geonodes_json_exporter_groups`, `_collections`, `_enabled`, `_filepath` (default `//tracking.json`). Export, import and auto-export all take the scene explicitly; do not merge data across scenes.
+- Tracked targets are per scene (`scene.geonodes_json_exporter_groups`, `_collections`) but the tracking file is global: `collect_tracked_groups()` / `collect_tracked_collections()` merge the targets of all `bpy.data.scenes`, and export and import use that merged set. `_enabled` and `_filepath` (default `//tracking.json`) are also stored per scene; the handlers and operators read them from the active scene (`bpy.context.scene`).
 - `save_post` runs `auto_export_handler` (export, then `update_cached_diff`). `load_post` only refreshes the diff. Both do nothing when tracking is disabled or the path can't be resolved.
 - Tracking file layout is `{version, tracked_inputs, meshes, all_node_trees}`. Each tracked node is `{"inputs": {socket: value}, "nodes": {nested group nodes}}`. **Any change to this layout must bump `FORMAT_VERSION`.** Import rejects other versions and the diff reports `OLD_FORMAT`.
 - Socket and node identity: duplicate socket names are disambiguated by `socket_labels` (`Value[0]`, `Value[1]`); nodes are keyed by `node_key` (`name` or `name (label)`). Export, import, topology and diff must all use these helpers so keys stay consistent.
