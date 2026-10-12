@@ -1,4 +1,6 @@
 import bpy
+import contextlib
+import functools
 import hashlib
 import json
 import math
@@ -19,7 +21,7 @@ UI_SPACING = 0.6        # Line spacing/compactness for items (lower = more compa
 MAX_DIFF_ROWS = 60      # Max rows drawn per diff section (inputs / meshes / links)
 
 DEFAULT_TRACKING_PATH = "//tracking.json"   # relative to the .blend file
-FORMAT_VERSION = 2                          # bump whenever the tracking JSON layout changes
+FORMAT_VERSION = 3                          # bump whenever the tracking JSON layout changes
 GIT_TIMEOUT = 5                             # seconds
 
 # Socket types whose default_value is a datablock, mapped to the bpy.data collection holding it.
@@ -30,6 +32,11 @@ ID_SOCKET_COLLECTIONS = {
     "NodeSocketImage": "images",
     "NodeSocketTexture": "textures",
 }
+
+# Node settings (e.g. Math 'operation') are exported when their RNA type is one of these.
+NODE_PROPERTY_TYPES = {'BOOLEAN', 'INT', 'FLOAT', 'STRING', 'ENUM'}
+NODE_UI_PROPERTIES = {"active_index", "ui_shortcut"}   # editor state, not node settings
+SKIPPED_PROPERTY_NODE_TYPES = {'FRAME', 'REROUTE'}     # their settings are layout only
 
 # ==============================================================================
 # GLOBALS & CACHE
@@ -94,11 +101,18 @@ def collect_tracked_collections():
 # CORE LOGIC
 # ==============================================================================
 
-def tree_key(tree):
-    """Unique JSON key of a node tree (linked trees can share a name with local ones)."""
-    if tree.library:
-        return f"{tree.name} ({os.path.basename(tree.library.filepath)})"
-    return tree.name
+def id_key(datablock):
+    """Unique JSON key of a datablock (linked datablocks can share a name with local ones)."""
+    if datablock.library:
+        return f"{datablock.name} ({os.path.basename(datablock.library.filepath)})"
+    return datablock.name
+
+def find_id(collection, key):
+    """Looks up a datablock in a bpy.data collection by its id_key."""
+    target = collection.get(key)
+    if target is not None and id_key(target) == key:
+        return target
+    return next((item for item in collection if id_key(item) == key), None)
 
 def socket_labels(sockets):
     """Labels for a node's sockets. Duplicate names (e.g. Math 'Value') get an index suffix."""
@@ -127,7 +141,7 @@ def get_node_tree_topology(node_tree):
     for link in node_tree.links:
         from_label = label_of(link.from_node, link.from_socket, True)
         to_label = label_of(link.to_node, link.to_socket, False)
-        text = f"[{link.from_node.name}] {from_label} -> {to_label} [{link.to_node.name}]"
+        text = f"[{node_key(link.from_node)}] {from_label} -> {to_label} [{node_key(link.to_node)}]"
         if link.is_muted:
             text += " (muted)"
         links.append(text)
@@ -168,70 +182,173 @@ def extract_meshes_state(collections):
             hasher.update(f"{coll_name}:{count}".encode('utf-8'))
             hasher.update(values.tobytes())
 
-        state[obj.name] = hasher.hexdigest()
+        state[id_key(obj)] = hasher.hexdigest()
 
     return {k: state[k] for k in sorted(state)}
 
 def format_value(val, decimals=4):
-    """Converts a socket value into JSON-safe data (rounded floats, nested lists)."""
+    """Converts a socket or property value into JSON-safe data (rounded floats, nested lists, ID keys)."""
     if isinstance(val, float):
-        return round(val, decimals) if math.isfinite(val) else str(val)
+        return round(val, decimals) + 0.0 if math.isfinite(val) else str(val)  # +0.0 turns -0.0 into 0.0
     if val is None or isinstance(val, (bool, int, str)):
         return val
+    if isinstance(val, bpy.types.ID):
+        return id_key(val)
+    if isinstance(val, (set, frozenset)):
+        return sorted(format_value(v, decimals) for v in val)
     return [format_value(v, decimals) for v in val]
+
+def log_failure(target, error):
+    print(f"Geometry Nodes JSON Exporter: could not set {target}: {type(error).__name__}: {error}")
+
+def resolve_id_value(collection_name, val):
+    """Returns (datablock, missing) for a stored ID value. None clears the pointer; strings are looked up by id_key."""
+    if val is None:
+        return None, False
+    if not isinstance(val, str):
+        raise TypeError(f"expected a datablock name, got {type(val).__name__}")
+    target = find_id(getattr(bpy.data, collection_name), val)
+    return target, target is None
 
 def get_node_input_value(socket):
     val = socket.default_value
     try:
-        if isinstance(val, bpy.types.ID):
-            return val.name
         return format_value(val)
-    except Exception:
+    except Exception as e:
+        print(f"Geometry Nodes JSON Exporter: storing input '{socket.name}' of node '{socket.node.name}' "
+              f"as text ({type(e).__name__}: {e})")
         return str(val)
 
 def set_node_input_value(socket, val):
     """Applies a JSON value to a socket. Returns 'applied', 'unchanged', 'skipped' or 'failed'."""
     try:
-        collection_name = ID_SOCKET_COLLECTIONS.get(socket.bl_idname)
-        if collection_name:
-            if val is None:
-                target = None
-            elif isinstance(val, str):
-                target = getattr(bpy.data, collection_name).get(val)
-                if target is None:
-                    return 'skipped'  # datablock doesn't exist in this file
-            else:
-                return 'failed'
-            if socket.default_value == target:
-                return 'unchanged'
-            socket.default_value = target
-            return 'applied'
-
         if get_node_input_value(socket) == val:
             return 'unchanged'
+        collection_name = ID_SOCKET_COLLECTIONS.get(socket.bl_idname)
+        if collection_name:
+            val, missing = resolve_id_value(collection_name, val)
+            if missing:
+                return 'skipped'  # datablock doesn't exist in this file
         socket.default_value = val
         return 'applied'
-    except Exception:
+    except Exception as e:
+        log_failure(f"input '{socket.name}' of node '{socket.node.name}'", e)
+        return 'failed'
+
+@functools.cache
+def node_base_properties():
+    """Identifiers of the properties every node has (name, location, ...), which are not node settings."""
+    return frozenset(p.identifier for p in bpy.types.Node.bl_rna.properties) | NODE_UI_PROPERTIES
+
+def iter_node_properties(node):
+    """Yields the RNA properties of a node's own settings (e.g. Math 'operation', Compare 'data_type')."""
+    if node.type in SKIPPED_PROPERTY_NODE_TYPES:
+        return
+    base = node_base_properties()
+    for prop in node.bl_rna.properties:
+        if prop.identifier in base or prop.is_readonly or prop.is_hidden or prop.type not in NODE_PROPERTY_TYPES:
+            continue
+        yield prop
+
+def get_node_property_value(node, prop):
+    return format_value(getattr(node, prop.identifier))
+
+def set_node_property_value(node, prop, val):
+    """Applies a JSON value to a node setting. Returns 'applied', 'unchanged' or 'failed'."""
+    try:
+        if get_node_property_value(node, prop) == val:
+            return 'unchanged'
+        if prop.type == 'ENUM' and prop.is_enum_flag:
+            val = set(val)
+        setattr(node, prop.identifier, val)
+        return 'applied'
+    except Exception as e:
+        log_failure(f"property '{prop.identifier}' of node '{node.name}'", e)
         return 'failed'
 
 def node_key(node):
     return f"{node.name} ({node.label})" if node.label else node.name
 
 def iter_input_sockets(node):
-    """Yields (label, socket) for visible inputs that carry a value."""
-    for label, socket in zip(socket_labels(list(node.inputs)), node.inputs):
-        if socket.is_unavailable or socket.hide or not hasattr(socket, "default_value"):
+    """Yields (label, socket) for available inputs that carry a value.
+
+    Hidden (Ctrl+H) inputs are included since their value still affects the result. The Value node keeps
+    its value on the output socket, so that one is yielded instead.
+    """
+    sockets = list(node.outputs if node.type == 'VALUE' else node.inputs)
+    for label, socket in zip(socket_labels(sockets), sockets):
+        if socket.is_unavailable or not hasattr(socket, "default_value"):
             continue
         yield label, socket
 
+def iter_tracked_modifiers(trees):
+    """Yields (object, modifier) for every Geometry Nodes modifier that uses one of the trees."""
+    for obj in bpy.data.objects:
+        for mod in obj.modifiers:
+            if mod.type == 'NODES' and mod.node_group in trees:
+                yield obj, mod
+
+def iter_modifier_inputs(mod):
+    """Yields (label, interface socket, modifier input) for the modifier inputs that carry a value."""
+    items = [
+        item for item in mod.node_group.interface.items_tree
+        if item.item_type == 'SOCKET' and item.in_out == 'INPUT'
+    ]
+    for label, item in zip(socket_labels(items), items):
+        mod_input = getattr(mod.properties.inputs, item.identifier, None)
+        if mod_input is not None and hasattr(mod_input, "value"):
+            yield label, item, mod_input
+
+def get_modifier_input_value(mod_input):
+    """Value of a modifier input, or {"attribute": name} / {"layer": name} when it reads one."""
+    if mod_input.type == 'ATTRIBUTE':
+        return {"attribute": mod_input.attribute_name}
+    if mod_input.type == 'LAYER':
+        return {"layer": mod_input.layer_name}
+    return format_value(mod_input.value)
+
+def set_modifier_input_value(obj, mod, item, mod_input, val):
+    """Applies a JSON value to a modifier input. Returns 'applied', 'unchanged', 'skipped' or 'failed'."""
+    try:
+        if get_modifier_input_value(mod_input) == val:
+            return 'unchanged'
+        if isinstance(val, dict):
+            if isinstance(val.get("attribute"), str):
+                mod_input.type = 'ATTRIBUTE'
+                mod_input.attribute_name = val["attribute"]
+            elif isinstance(val.get("layer"), str):
+                mod_input.type = 'LAYER'
+                mod_input.layer_name = val["layer"]
+            else:
+                raise ValueError(f"unknown input source {val}")
+        else:
+            collection_name = ID_SOCKET_COLLECTIONS.get(item.socket_type)
+            if collection_name:
+                val, missing = resolve_id_value(collection_name, val)
+                if missing:
+                    return 'skipped'  # datablock doesn't exist in this file
+            mod_input.value = val
+            mod_input.type = 'VALUE'
+        obj.update_tag()
+        return 'applied'
+    except Exception as e:
+        log_failure(f"input '{item.name}' of modifier '{mod.name}' on '{obj.name}'", e)
+        return 'failed'
+
 def extract_node_tree_data(node_tree, current_depth, max_depth, groups_only=False):
-    """Returns {node: {"inputs": {...}, "nodes": {nested group content}}}; empty parts are omitted."""
+    """Returns {node: {"properties": {...}, "inputs": {...}, "nodes": {nested group content}}}.
+
+    Empty parts are omitted.
+    """
     tree_data = {}
     for node in node_tree.nodes:
         is_group = node.type == 'GROUP'
         entry = {}
 
         if not groups_only or is_group:
+            properties = {prop.identifier: get_node_property_value(node, prop) for prop in iter_node_properties(node)}
+            if properties:
+                entry["properties"] = properties
             inputs = {label: get_node_input_value(socket) for label, socket in iter_input_sockets(node)}
             if inputs:
                 entry["inputs"] = inputs
@@ -257,44 +374,75 @@ def apply_node_tree_data(node_tree, tree_data, current_depth, max_depth, groups_
 
         is_group = node.type == 'GROUP'
 
-        inputs = entry.get("inputs")
-        if isinstance(inputs, dict) and (not groups_only or is_group):
-            for label, socket in iter_input_sockets(node):
-                if label in inputs:
-                    stats[set_node_input_value(socket, inputs[label])] += 1
+        if not groups_only or is_group:
+            # Settings first: they can change which input sockets are available.
+            properties = entry.get("properties")
+            if isinstance(properties, dict):
+                for prop in iter_node_properties(node):
+                    if prop.identifier in properties:
+                        stats[set_node_property_value(node, prop, properties[prop.identifier])] += 1
+
+            inputs = entry.get("inputs")
+            if isinstance(inputs, dict):
+                for label, socket in iter_input_sockets(node):
+                    if label in inputs:
+                        stats[set_node_input_value(socket, inputs[label])] += 1
 
         if is_group and node.node_tree and current_depth < max_depth:
             apply_node_tree_data(node.node_tree, entry.get("nodes"), current_depth + 1, max_depth, groups_only, stats)
 
+def extract_modifiers_data(trees):
+    """Returns {object: {modifier: {"inputs": {...}}}} for the Geometry Nodes modifiers using the trees."""
+    data = {}
+    for obj, mod in iter_tracked_modifiers(trees):
+        inputs = {label: get_modifier_input_value(mod_input) for label, _item, mod_input in iter_modifier_inputs(mod)}
+        if inputs:
+            data.setdefault(id_key(obj), {})[mod.name] = {"inputs": inputs}
+    return data
+
+def apply_modifiers_data(trees, data, stats):
+    if not isinstance(data, dict):
+        return
+
+    for obj, mod in iter_tracked_modifiers(trees):
+        modifiers = data.get(id_key(obj))
+        entry = modifiers.get(mod.name) if isinstance(modifiers, dict) else None
+        inputs = entry.get("inputs") if isinstance(entry, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for label, item, mod_input in iter_modifier_inputs(mod):
+            if label in inputs:
+                stats[set_modifier_input_value(obj, mod, item, mod_input, inputs[label])] += 1
+
 def export_nodes_to_json(filepath):
     """Writes the tracking file for the targets of all scenes."""
+    tracked_groups = collect_tracked_groups()
     result = {
         "version": FORMAT_VERSION,
-        "tracked_inputs": {},
+        "tracked_inputs": {
+            id_key(tree): extract_node_tree_data(tree, 0, config["depth"], config["groups_only"])
+            for tree, config in tracked_groups.items()
+        },
+        "modifiers": extract_modifiers_data(tracked_groups),
         "meshes": extract_meshes_state(collect_tracked_collections()),
-        "all_node_trees": {},
+        "all_node_trees": {id_key(tree): get_node_tree_topology(tree) for tree in bpy.data.node_groups},
     }
-
-    topologies = {tree_key(tree): get_node_tree_topology(tree) for tree in bpy.data.node_groups}
-    for name in sorted(topologies):
-        result["all_node_trees"][name] = topologies[name]
-
-    tracked = {
-        tree_key(tree): extract_node_tree_data(tree, 0, config["depth"], config["groups_only"])
-        for tree, config in collect_tracked_groups().items()
-    }
-    for name in sorted(tracked):
-        result["tracked_inputs"][name] = tracked[name]
 
     directory = os.path.dirname(filepath)
     if directory:
         os.makedirs(directory, exist_ok=True)
 
     # Write to a temp file first so a failure never leaves a truncated tracking file.
+    # sort_keys keeps the output independent of node, scene and datablock order.
     temp_path = filepath + ".tmp"
-    with open(temp_path, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=4)
-    os.replace(temp_path, filepath)
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=4, sort_keys=True)
+        os.replace(temp_path, filepath)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(temp_path)
+        raise
 
 def import_nodes_from_json(filepath):
     """Applies stored inputs to the tracked groups of all scenes. Returns a Counter of per-input outcomes."""
@@ -313,11 +461,14 @@ def import_nodes_from_json(filepath):
 
     tracked_inputs = data.get("tracked_inputs", {})
     stats = Counter({'applied': 0, 'unchanged': 0, 'skipped': 0, 'failed': 0})
+    tracked_groups = collect_tracked_groups()
 
-    for tree, config in collect_tracked_groups().items():
-        key = tree_key(tree)
+    for tree, config in tracked_groups.items():
+        key = id_key(tree)
         if key in tracked_inputs:
             apply_node_tree_data(tree, tracked_inputs[key], 0, config["depth"], config["groups_only"], stats)
+
+    apply_modifiers_data(tracked_groups, data.get("modifiers", {}), stats)
 
     return stats
 
@@ -337,16 +488,21 @@ def run_git(args, cwd):
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
-def flatten_inputs(nodes, path=()):
-    """Flattens {node: {"inputs", "nodes"}} into {(node path, input): value}."""
+def flatten_entries(nodes, path=()):
+    """Flattens {node: {"properties", "inputs", "nodes"}} into {(node path, label): value}.
+
+    Node settings get a ' (property)' suffix to tell them apart from inputs.
+    """
     flat = {}
     for name, entry in nodes.items():
         if not isinstance(entry, dict):
             continue
         node_path = path + (name,)
+        for prop, value in entry.get("properties", {}).items():
+            flat[(node_path, f"{prop} (property)")] = value
         for label, value in entry.get("inputs", {}).items():
             flat[(node_path, label)] = value
-        flat.update(flatten_inputs(entry.get("nodes", {}), node_path))
+        flat.update(flatten_entries(entry.get("nodes", {}), node_path))
     return flat
 
 def diff_meshes(old_meshes, new_meshes):
@@ -372,21 +528,24 @@ def diff_trees(old_trees, new_trees):
             changes[tree_name] = {"added": added, "removed": removed}
     return changes
 
-def diff_inputs(old_inputs, new_inputs):
-    """Returns {tracked tree: {node path: [(input, change type, old, new), ...]}}."""
-    def flatten_all(tracked):
+def diff_entries(old_entries, new_entries):
+    """Returns {parent: {node path: [(label, change type, old, new), ...]}}.
+
+    Used for tracked trees (parent = tree, path = nodes) and modifiers (parent = object, path = modifier).
+    """
+    def flatten_all(entries):
         flat = {}
-        for tree_name, nodes in tracked.items():
-            for (node_path, label), value in flatten_inputs(nodes).items():
-                flat[(tree_name, " > ".join(node_path), label)] = value
+        for parent, nodes in entries.items():
+            for (node_path, label), value in flatten_entries(nodes).items():
+                flat[(parent, " > ".join(node_path), label)] = value
         return flat
 
-    old_flat = flatten_all(old_inputs)
-    new_flat = flatten_all(new_inputs)
+    old_flat = flatten_all(old_entries)
+    new_flat = flatten_all(new_entries)
 
     changes = {}
     for key in sorted(set(old_flat) | set(new_flat)):
-        tree_name, node_path, label = key
+        parent, node_path, label = key
         if key not in old_flat:
             change = (label, 'ADD', None, new_flat[key])
         elif key not in new_flat:
@@ -395,7 +554,7 @@ def diff_inputs(old_inputs, new_inputs):
             change = (label, 'CHANGE', old_flat[key], new_flat[key])
         else:
             continue
-        changes.setdefault(tree_name, {}).setdefault(node_path, []).append(change)
+        changes.setdefault(parent, {}).setdefault(node_path, []).append(change)
     return changes
 
 def update_cached_diff(filepath):
@@ -406,7 +565,8 @@ def update_cached_diff(filepath):
         "has_changes": False,
         "meshes": [],
         "trees": {},
-        "inputs": {}
+        "inputs": {},
+        "modifiers": {},
     }
 
     if not filepath or not os.path.exists(filepath):
@@ -440,10 +600,15 @@ def update_cached_diff(filepath):
         with open(filepath, 'r', encoding='utf-8') as f:
             current_data = json.load(f)
 
+        if not isinstance(current_data, dict) or current_data.get("version") != FORMAT_VERSION:
+            _cached_diff["status"] = "STALE_FILE"
+            return
+
         _cached_diff["meshes"] = diff_meshes(committed_data.get("meshes", {}), current_data.get("meshes", {}))
         _cached_diff["trees"] = diff_trees(committed_data.get("all_node_trees", {}), current_data.get("all_node_trees", {}))
-        _cached_diff["inputs"] = diff_inputs(committed_data.get("tracked_inputs", {}), current_data.get("tracked_inputs", {}))
-        _cached_diff["has_changes"] = bool(_cached_diff["meshes"] or _cached_diff["trees"] or _cached_diff["inputs"])
+        _cached_diff["inputs"] = diff_entries(committed_data.get("tracked_inputs", {}), current_data.get("tracked_inputs", {}))
+        _cached_diff["modifiers"] = diff_entries(committed_data.get("modifiers", {}), current_data.get("modifiers", {}))
+        _cached_diff["has_changes"] = any(_cached_diff[k] for k in ("meshes", "trees", "inputs", "modifiers"))
 
     except FileNotFoundError:
         _cached_diff["status"] = "NO_GIT"
@@ -465,8 +630,11 @@ def trigger_ui_redraw():
 # PROPERTIES
 # ==============================================================================
 
+def poll_geometry_node_tree(self, tree):
+    return tree.bl_idname == 'GeometryNodeTree'
+
 class GeoNodesExporterNodeGroup(bpy.types.PropertyGroup):
-    group_ptr: bpy.props.PointerProperty(type=bpy.types.NodeTree, name="Node Group")  # type: ignore
+    group_ptr: bpy.props.PointerProperty(type=bpy.types.NodeTree, name="Node Group", poll=poll_geometry_node_tree)  # type: ignore
     depth: bpy.props.IntProperty(name="Depth", default=0, min=0)  # type: ignore
     groups_only: bpy.props.BoolProperty(name="Groups Only", default=False)  # type: ignore
 
@@ -537,7 +705,7 @@ class GEONODES_JSON_OT_import(bpy.types.Operator, ImportHelper):
         if stats['failed'] or stats['skipped']:
             self.report({'WARNING'}, f"Imported from {self.filepath}: {summary}")
         elif sum(stats.values()) == 0:
-            self.report({'WARNING'}, f"Nothing to import: no tracked node group matched {self.filepath}")
+            self.report({'WARNING'}, f"Nothing to import: no tracked node group or modifier matched {self.filepath}")
         else:
             self.report({'INFO'}, f"Imported from {self.filepath}: {summary}")
         return {'FINISHED'}
@@ -587,6 +755,11 @@ def auto_export_handler(dummy):
 
 @bpy.app.handlers.persistent
 def load_post_handler(dummy):
+    global _cached_diff, _export_error
+    # The diff and export error of the previously open file don't apply to this one.
+    _cached_diff = None
+    _export_error = None
+
     scene = bpy.context.scene
     if not is_tracking_enabled(scene):
         return
@@ -605,12 +778,20 @@ class RowBudget:
         self.left = limit
         self.skipped = 0
 
+    @property
+    def exhausted(self):
+        return self.left <= 0
+
     def take(self):
         if self.left > 0:
             self.left -= 1
             return True
         self.skipped += 1
         return False
+
+    def skip(self, count):
+        """Counts rows left out without drawing their container."""
+        self.skipped += count
 
     def draw_remainder(self, layout):
         if self.skipped:
@@ -633,27 +814,35 @@ def draw_link(layout, link, icon):
     else:
         link_box.label(text=shorten(link, 100), icon=icon)
 
-def draw_inputs_section(box):
-    inputs = _cached_diff["inputs"]
-    total = sum(len(changes) for nodes in inputs.values() for changes in nodes.values())
+def draw_entries_section(box, title, icon, entries, parent_icon, child_icon):
+    """Draws diff_entries output ({parent: {child: [changes]}}) as nested boxes."""
+    total = sum(len(changes) for children in entries.values() for changes in children.values())
     section = box.box()
-    section.label(text=f"Inputs ({total} inputs changed)", icon='PREFERENCES')
+    section.label(text=f"{title} ({total} values changed)", icon=icon)
     budget = RowBudget(MAX_DIFF_ROWS)
 
-    for parent, nodes in inputs.items():
+    for parent, children in entries.items():
+        if budget.exhausted:
+            budget.skip(sum(len(changes) for changes in children.values()))
+            continue
+
         pb = section.box()
         pb_row = pb.row()
         pb_row.scale_y = UI_SPACING
-        pb_row.label(text=parent, icon='NODETREE')
+        pb_row.label(text=parent, icon=parent_icon)
 
-        for node, changes in nodes.items():
+        for child, changes in children.items():
+            if budget.exhausted:
+                budget.skip(len(changes))
+                continue
+
             nsplit = pb.split(factor=UI_INDENT)
             nsplit.column()
             nb = nsplit.column().box()
 
             nb_row = nb.row()
             nb_row.scale_y = UI_SPACING
-            nb_row.label(text=node, icon='NODE')
+            nb_row.label(text=child, icon=child_icon)
 
             isplit = nb.split(factor=UI_INDENT)
             isplit.column()
@@ -667,14 +856,14 @@ def draw_inputs_section(box):
                 row.alignment = 'LEFT'
 
                 if change_type == 'ADD':
-                    row.label(text=f"{inp}: {new_val}", icon='ADD')
+                    row.label(text=f"{inp}: {shorten(str(new_val))}", icon='ADD')
                 elif change_type == 'REMOVE':
-                    row.label(text=f"{inp}: {old_val}", icon='REMOVE')
+                    row.label(text=f"{inp}: {shorten(str(old_val))}", icon='REMOVE')
                 else:
                     row.label(text=f"{inp}:", icon='DOT')
-                    row.label(text=str(old_val))
+                    row.label(text=shorten(str(old_val)))
                     row.label(text="", icon='FORWARD')
-                    row.label(text=str(new_val))
+                    row.label(text=shorten(str(new_val)))
 
     budget.draw_remainder(section)
 
@@ -702,12 +891,16 @@ def draw_links_section(box):
     budget = RowBudget(MAX_DIFF_ROWS)
 
     for tree_name, tree_data in trees.items():
+        links = [(link, 'UNLINKED') for link in tree_data["removed"]] + [(link, 'LINKED') for link in tree_data["added"]]
+        if budget.exhausted:
+            budget.skip(len(links))
+            continue
+
         b = section.box()
         b.label(text=tree_name, icon='NODETREE')
-        for links, icon in ((tree_data["removed"], 'UNLINKED'), (tree_data["added"], 'LINKED')):
-            for link in links:
-                if budget.take():
-                    draw_link(b, link, icon)
+        for link, icon in links:
+            if budget.take():
+                draw_link(b, link, icon)
 
     budget.draw_remainder(section)
 
@@ -718,6 +911,7 @@ DIFF_STATUS_MESSAGES = {
     "NO_COMMIT": ("File not yet in Git or no previous commit.", 'INFO'),
     "INVALID_JSON": ("Committed tracking file is not valid JSON.", 'ERROR'),
     "OLD_FORMAT": ("Committed tracking file uses an older format. Commit the new one to resume diffing.", 'INFO'),
+    "STALE_FILE": ("Tracking file was written by another add-on version. Save to rewrite it.", 'INFO'),
 }
 
 def draw_git_diff(layout):
@@ -749,7 +943,9 @@ def draw_git_diff(layout):
         return
 
     if _cached_diff["inputs"]:
-        draw_inputs_section(box)
+        draw_entries_section(box, "Inputs", 'PREFERENCES', _cached_diff["inputs"], 'NODETREE', 'NODE')
+    if _cached_diff["modifiers"]:
+        draw_entries_section(box, "Modifiers", 'MODIFIER', _cached_diff["modifiers"], 'OBJECT_DATA', 'GEOMETRY_NODES')
     if _cached_diff["meshes"]:
         draw_meshes_section(box)
     if _cached_diff["trees"]:

@@ -9,8 +9,8 @@ Blender extension (5.2+) that exports Geometry Nodes input values, node links an
 
 ## How it works
 - Tracked targets are per scene (`scene.geonodes_json_exporter_groups`, `_collections`) but the tracking file is global: `collect_tracked_groups()` / `collect_tracked_collections()` merge the targets of all `bpy.data.scenes`, and export and import use that merged set. `_enabled` and `_filepath` (default `//tracking.json`) are also stored per scene; the handlers and operators read them from the active scene (`bpy.context.scene`).
-- `save_post` runs `auto_export_handler` (export, then `update_cached_diff`). `load_post` only refreshes the diff. Both do nothing when tracking is disabled or the path can't be resolved.
-- Tracking file layout is `{version, tracked_inputs, meshes, all_node_trees}`. Each tracked node is `{"inputs": {socket: value}, "nodes": {nested group nodes}}`. **Any change to this layout must bump `FORMAT_VERSION`.** Import rejects other versions and the diff reports `OLD_FORMAT`.
+- `save_post` runs `auto_export_handler` (export, then `update_cached_diff`). `load_post` resets `_cached_diff` / `_export_error`, then only refreshes the diff. Both do nothing more when tracking is disabled or the path can't be resolved.
+- Tracking file layout is `{version, tracked_inputs, modifiers, meshes, all_node_trees}`. Each tracked node is `{"properties": {setting: value}, "inputs": {socket: value}, "nodes": {nested group nodes}}`; `modifiers` is `{object: {modifier: {"inputs": {...}}}}` for Geometry Nodes modifiers using a tracked group. Datablocks are keyed by `id_key` (adds the library file for linked data). **Any change to this layout must bump `FORMAT_VERSION`.** Import rejects other versions and the diff reports `OLD_FORMAT` (committed) or `STALE_FILE` (working copy).
 - Socket and node identity: duplicate socket names are disambiguated by `socket_labels` (`Value[0]`, `Value[1]`); nodes are keyed by `node_key` (`name` or `name (label)`). Export, import, topology and diff must all use these helpers so keys stay consistent.
 - `_cached_diff` and `_export_error` are module globals read by the panel. Reset them in `unregister()`.
 
