@@ -1,6 +1,7 @@
 name: Sync to Grip
 
-# On every push to master that touches the add-on, copy it into oleroma/Grip/extensions/blender-tracking.
+# On every push to master that touches the add-on, copy it into oleroma/Grip/extensions/blender_tracking.
+# The destination folder must match the manifest id (a valid Python identifier).
 on:
   push:
     branches: [master]
@@ -31,22 +32,22 @@ jobs:
 
       - name: Copy add-on into Grip
         run: |
-          rm -rf grip/extensions/blender-tracking
-          mkdir -p grip/extensions/blender-tracking
-          cp -r blender-tracking/. grip/extensions/blender-tracking/
-          find grip/extensions/blender-tracking -name "__pycache__" -type d -prune -exec rm -rf {} +
+          rm -rf grip/extensions/blender-tracking grip/extensions/blender_tracking
+          mkdir -p grip/extensions/blender_tracking
+          cp -r blender-tracking/. grip/extensions/blender_tracking/
+          find grip/extensions/blender_tracking -name "__pycache__" -type d -prune -exec rm -rf {} +
 
       - name: Commit and push if changed
         working-directory: grip
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A extensions/blender-tracking
+          git add -A extensions
           if git diff --cached --quiet; then
             echo "No changes"
             exit 0
           fi
-          git commit -m "Sync blender-tracking from ${GITHUB_SHA::7}"
+          git commit -m "Sync blender_tracking from ${GITHUB_SHA::7}"
           for i in 1 2 3; do
             git pull --rebase origin main && git push origin HEAD:main && exit 0
             sleep $((i * 5))
